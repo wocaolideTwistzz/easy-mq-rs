@@ -1,16 +1,19 @@
+use bincode::config::{self};
 use serde::{Deserialize, Serialize};
+
+use crate::errors::Result;
 
 /// 定义任务结构体
 /// Define the Task struct
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Task<T> {
+pub struct Task {
     /// 任务的唯一标识符
     /// Unique identifier for the task
     pub id: String,
 
     /// 任务负载，包含任务的具体数据
     /// Task payload, contains the actual data of the task
-    pub payload: T,
+    pub payload: Option<Vec<u8>>,
 
     /// 任务选项，包含任务的配置信息，如优先级、重试策略等
     /// Task options, contains configuration information such as priority, retry strategy, etc.
@@ -23,30 +26,35 @@ pub struct Task<T> {
 
 /// 定义任务选项结构体，包含任务的配置参数
 /// Define the TaskOptions struct, contains configuration parameters for the task
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TaskOptions {
     /// 任务主题，可选，用于标识任务的类别或分组
     /// Task topic, optional, used to identify the category or group of the task
     pub topic: Option<String>,
 
-    /// 任务优先级，值越小优先级越高
-    /// Task priority, lower value indicates higher priority
+    /// 任务优先级，值越小优先级越高 默认为0, 可以使用负数来表达更高的优先级
+    /// Task priority, lower value indicates higher priority.
+    /// The default value is 0，and negative number can be used to express higher priority.
     pub priority: i8,
 
-    /// 任务保留时间（单位：秒），用于指定任务在完成后保留的时间
+    /// 任务保留时间（单位：秒），用于指定任务在完成后保留的时间 默认保留7天
     /// Task retention time (in seconds), specifies how long the task stays after completed.
+    /// The default retention period is 7 days.
     pub retention: u64,
 
-    /// 重试策略，可选，定义任务失败后的重试行为
+    /// 重试策略，可选，定义任务失败后的重试行为 默认不做重试
     /// Retry strategy, optional, defines the behavior for retrying failed tasks
+    /// Default is not retry
     pub retry: Option<Retry>,
 
-    /// 任务超时时间（单位：秒），可选，指定任务执行的最大时长
-    /// Task timeout (in seconds), optional, specifies the maximum duration for task execution
+    /// 任务超时时间（单位：秒），可选，指定任务执行的最大时长 默认不设置超时时间
+    /// Task timeout (in seconds), optional, specifies the maximum duration for task execution.
+    /// No timeout is set by default
     pub timeout: Option<u64>,
 
-    /// 任务截止时间（单位： Unix秒级时间戳），可选，指定任务必须完成的时间点
+    /// 任务截止时间（单位： Unix秒级时间戳），可选，指定任务必须完成的时间点 默认不设置截止时间
     /// Task deadline (unix timestamp), optional, specifies the time by which the task must be completed
+    /// No deadline is set by default
     pub deadline: Option<u64>,
 
     /// 任务调度时间，可选，指定任务的执行时间或依赖条件
@@ -60,7 +68,7 @@ pub struct TaskOptions {
 pub struct Retry {
     /// 最大重试次数
     /// Maximum number of retry attempts
-    pub max_retry: u32,
+    pub max_retries: u32,
 
     /// 重试间隔时间（单位：秒）
     /// Retry interval time (in seconds)
@@ -190,38 +198,112 @@ pub enum TaskState {
     Canceled,
 }
 
-impl<T> Task<T> {
-    pub fn new(payload: T) -> Task<T> {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
+impl Task {
+    /// 创建一个新的 Task 实例，生成一个 UUID 作为 id，并且允许传入一个可选的 payload
+    /// Creates a new Task instance with a generated UUID as id, and an optional payload
+    pub fn new(payload: Option<Vec<u8>>) -> Task {
+        Self::new_with(
+            uuid::Uuid::new_v4().to_string(),
             payload,
-            options: TaskOptions::default(),
-            runtime: TaskRuntime::default(),
-        }
+            TaskOptions::default(),
+        )
     }
 
-    pub fn new_with_id(id: impl Into<String>, payload: T) -> Task<T> {
+    /// 创建一个带有指定 id 和可选 payload 的 Task 实例
+    /// Creates a Task instance with a specified id and optional payload
+    pub fn new_with_id(id: impl Into<String>, payload: Option<Vec<u8>>) -> Task {
+        Self::new_with(id, payload, TaskOptions::default())
+    }
+
+    /// 创建一个带有指定 id、payload 和选项的 Task 实例
+    /// Creates a Task instance with a specified id, payload, and options
+    pub fn new_with(id: impl Into<String>, payload: Option<Vec<u8>>, options: TaskOptions) -> Task {
         Self {
             id: id.into(),
-            payload,
-            options: TaskOptions::default(),
+            payload: payload.into(),
+            options,
             runtime: TaskRuntime::default(),
         }
     }
 
-    pub fn new_with_topic_id(
-        topic: impl Into<String>,
+    /// 创建一个新的 Task，并通过bincode序列化 payload 来填充 payload 字段
+    /// Creates a new Task instance by bincode serializing the payload and filling the payload field
+    pub fn try_new_with_serde<S>(
         id: impl Into<String>,
-        payload: T,
-    ) -> Task<T> {
+        payload: S,
+        options: TaskOptions,
+    ) -> Result<Task>
+    where
+        S: Serialize,
+    {
+        let payload_buf = bincode::serde::encode_to_vec(payload, config::standard())?;
+        Ok(Self::new_with(id, Some(payload_buf), options))
+    }
+
+    /// 设置任务的主题（topic）
+    /// Sets the topic for the task
+    pub fn with_topic(mut self, topic: impl Into<String>) -> Task {
+        self.options.topic = Some(topic.into());
+        self
+    }
+
+    /// 设置任务的优先级 值越小优先级越高，可以使用负数来表达更高的优先级
+    /// Sets the priority for the task, lower value indicates higher priority.
+    pub fn with_priority(mut self, priority: i8) -> Task {
+        self.options.priority = priority;
+        self
+    }
+
+    /// 设置任务完成后的保留时间（retention），单位是秒
+    /// Specifies how long the task stays after completed in seconds
+    pub fn with_retention(mut self, retention: u64) -> Task {
+        self.options.retention = retention;
+        self
+    }
+
+    /// 设置任务的重试策略，指定最大重试次数和重试间隔（单位：秒）
+    /// Sets the retry strategy for the task, with max retries and retry interval in seconds the behavior for retrying failed tasks
+    pub fn with_retry(mut self, max_retries: u32, interval: u32) -> Task {
+        self.options.retry = Some(Retry {
+            max_retries,
+            interval,
+        });
+        self
+    }
+
+    /// 设置任务的超时时间（timeout），单位是秒
+    /// Sets the timeout for the task, in seconds
+    pub fn with_timeout(mut self, timeout: u64) -> Task {
+        self.options.timeout = Some(timeout);
+        self
+    }
+
+    /// 设置任务的截止时间（deadline），单位是秒
+    /// Sets the deadline for the task, in seconds
+    pub fn with_deadline(mut self, deadline: u64) -> Task {
+        self.options.deadline = Some(deadline);
+        self
+    }
+
+    /// 设置任务的执行时间或依赖条件
+    /// Sets the scheduled time or dependency condition of the task
+    pub fn with_scheduled(mut self, scheduled_at: ScheduledAt) -> Task {
+        self.options.scheduled_at = Some(scheduled_at);
+        self.runtime.state = TaskState::Scheduled;
+        self
+    }
+}
+
+impl Default for TaskOptions {
+    fn default() -> Self {
         Self {
-            id: id.into(),
-            payload,
-            options: TaskOptions {
-                topic: Some(topic.into()),
-                ..Default::default()
-            },
-            runtime: TaskRuntime::default(),
+            topic: None,
+            priority: 0,
+            retention: 60 * 60 * 24 * 7,
+            retry: None,
+            timeout: None,
+            deadline: None,
+            scheduled_at: None,
         }
     }
 }
