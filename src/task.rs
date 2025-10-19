@@ -7,6 +7,10 @@ use crate::errors::Result;
 /// Define the Task struct
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Task {
+    /// 任务主题，用于标识任务的类别或分组
+    /// Task topic, used to identify the category or group of the task
+    pub topic: String,
+
     /// 任务的唯一标识符
     /// Unique identifier for the task
     pub id: String,
@@ -28,10 +32,6 @@ pub struct Task {
 /// Define the TaskOptions struct, contains configuration parameters for the task
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskOptions {
-    /// 任务主题，可选，用于标识任务的类别或分组
-    /// Task topic, optional, used to identify the category or group of the task
-    pub topic: Option<String>,
-
     /// 任务优先级，值越小优先级越高 默认为0, 可以使用负数来表达更高的优先级
     /// Task priority, lower value indicates higher priority.
     /// The default value is 0，and negative number can be used to express higher priority.
@@ -201,8 +201,9 @@ pub enum TaskState {
 impl Task {
     /// 创建一个新的 Task 实例，生成一个 UUID 作为 id，并且允许传入一个可选的 payload
     /// Creates a new Task instance with a generated UUID as id, and an optional payload
-    pub fn new(payload: Option<Vec<u8>>) -> Task {
+    pub fn new(topic: impl Into<String>, payload: Option<Vec<u8>>) -> Task {
         Self::new_with(
+            topic,
             uuid::Uuid::new_v4().to_string(),
             payload,
             TaskOptions::default(),
@@ -211,14 +212,24 @@ impl Task {
 
     /// 创建一个带有指定 id 和可选 payload 的 Task 实例
     /// Creates a Task instance with a specified id and optional payload
-    pub fn new_with_id(id: impl Into<String>, payload: Option<Vec<u8>>) -> Task {
-        Self::new_with(id, payload, TaskOptions::default())
+    pub fn new_with_id(
+        topic: impl Into<String>,
+        id: impl Into<String>,
+        payload: Option<Vec<u8>>,
+    ) -> Task {
+        Self::new_with(topic, id, payload, TaskOptions::default())
     }
 
     /// 创建一个带有指定 id、payload 和选项的 Task 实例
     /// Creates a Task instance with a specified id, payload, and options
-    pub fn new_with(id: impl Into<String>, payload: Option<Vec<u8>>, options: TaskOptions) -> Task {
+    pub fn new_with(
+        id: impl Into<String>,
+        topic: impl Into<String>,
+        payload: Option<Vec<u8>>,
+        options: TaskOptions,
+    ) -> Task {
         Self {
+            topic: topic.into(),
             id: id.into(),
             payload: payload.into(),
             options,
@@ -229,6 +240,7 @@ impl Task {
     /// 创建一个新的 Task，并通过bincode序列化 payload 来填充 payload 字段
     /// Creates a new Task instance by bincode serializing the payload and filling the payload field
     pub fn try_new_with_serde<S>(
+        topic: impl Into<String>,
         id: impl Into<String>,
         payload: S,
         options: TaskOptions,
@@ -237,14 +249,7 @@ impl Task {
         S: Serialize,
     {
         let payload_buf = bincode::serde::encode_to_vec(payload, config::standard())?;
-        Ok(Self::new_with(id, Some(payload_buf), options))
-    }
-
-    /// 设置任务的主题（topic）
-    /// Sets the topic for the task
-    pub fn with_topic(mut self, topic: impl Into<String>) -> Task {
-        self.options.topic = Some(topic.into());
-        self
+        Ok(Self::new_with(topic, id, Some(payload_buf), options))
     }
 
     /// 设置任务的优先级 值越小优先级越高，可以使用负数来表达更高的优先级
@@ -297,7 +302,6 @@ impl Task {
 impl Default for TaskOptions {
     fn default() -> Self {
         Self {
-            topic: None,
             priority: 0,
             retention: 60 * 60 * 24 * 7,
             retry: None,
