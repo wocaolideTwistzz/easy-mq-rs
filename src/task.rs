@@ -40,7 +40,7 @@ pub struct TaskOptions {
     /// 任务保留时间（单位：秒），用于指定任务在完成后保留的时间 默认保留7天
     /// Task retention time (in seconds), specifies how long the task stays after completed.
     /// The default retention period is 7 days.
-    pub retention: u64,
+    pub retention_sec: u64,
 
     /// 重试策略，可选，定义任务失败后的重试行为 默认不做重试
     /// Retry strategy, optional, defines the behavior for retrying failed tasks
@@ -50,12 +50,12 @@ pub struct TaskOptions {
     /// 任务超时时间（单位：秒），可选，指定任务执行的最大时长 默认不设置超时时间
     /// Task timeout (in seconds), optional, specifies the maximum duration for task execution.
     /// No timeout is set by default
-    pub timeout: Option<u64>,
+    pub timeout_sec: Option<u64>,
 
     /// 任务截止时间（单位： Unix秒级时间戳），可选，指定任务必须完成的时间点 默认不设置截止时间
     /// Task deadline (unix timestamp), optional, specifies the time by which the task must be completed
     /// No deadline is set by default
-    pub deadline: Option<u64>,
+    pub deadline_sec: Option<u64>,
 
     /// 任务调度时间，可选，指定任务的执行时间或依赖条件
     /// Task scheduled time, optional, specifies when or under what conditions the task should be executed
@@ -72,7 +72,7 @@ pub struct Retry {
 
     /// 重试间隔时间（单位：秒）
     /// Retry interval time (in seconds)
-    pub interval: u32,
+    pub interval_sec: u32,
 }
 
 /// 定义任务调度时间的枚举类型
@@ -81,7 +81,7 @@ pub struct Retry {
 pub enum ScheduledAt {
     /// 指定任务在某个时间戳（单位：秒）执行
     /// Specifies that the task should be executed at a certain unix timestamp
-    Timestamp(u64),
+    TimestampSec(u64),
 
     /// 指定任务在某些其他任务完成后执行
     /// Specifies that the task should be executed after certain other tasks are completed
@@ -123,7 +123,7 @@ pub struct TaskRuntime {
 
     /// 下次处理时间（单位：秒），表示任务计划执行的时间戳
     /// Next process time (in seconds), indicates the timestamp when the task is scheduled to be processed
-    pub next_process_at: u64,
+    pub next_process_at_sec: u64,
 
     /// 当前任务是否处于活动状态，且没有工作线程对其进行处理。
     /// 一个孤立的任务表示该工作进程已崩溃或遭遇网络故障，无法继续延长租期。
@@ -138,30 +138,33 @@ pub struct TaskRuntime {
     /// This field is only applicable to tasks with TaskStateActive.
     pub is_orphaned: bool,
 
-    /// 错误信息列表，可选，记录任务执行过程中的错误
-    /// List of error messages, optional, records errors encountered during task execution
-    pub errors: Option<Vec<ErrorMessage>>,
+    /// 最后一次处于`pending`状态, 开始等待执行的时间(单位：毫秒)
+    /// The last time it was in the `pending` state and started waiting for execution. (in milliseconds)
+    pub last_pending_at_ms: Option<u64>,
 
-    /// 任务完成时间（单位：秒），记录任务完成的时间戳
+    /// 最后一次处于`active`状态, 被某个消费者取出的时间(单位：毫秒)
+    /// The last time it was int the `active` state and was retrieved by a  consumer. (in milliseconds)
+    pub last_active_at_ms: Option<u64>,
+
+    /// 最后一次执行该任务的worker.
+    /// The worker that last executed the task.
+    pub last_worker: Option<String>,
+
+    /// 最后一次失败错误信息
+    /// Last failed error message.
+    pub last_err: Option<String>,
+
+    /// 最后一次失败时间（单位：毫秒），记录错误发生的时间戳
+    /// Last failure time (in milliseconds), records the timestamp when the error occurred
+    pub last_err_at_ms: Option<u64>,
+
+    /// 任务完成时间（单位：毫秒），记录任务完成的时间戳
     /// Task completion time (in seconds), records the timestamp when the task was completed
-    pub completed_at: u64,
+    pub completed_at_ms: Option<u64>,
 
     /// 任务执行结果，可选，存储任务的输出数据（以字节形式）
     /// Task execution result, optional, stores the output data of the task (in bytes)
     pub result: Option<Vec<u8>>,
-}
-
-/// 定义错误消息结构体，记录任务失败时的错误信息
-/// Define the ErrorMessage struct, records error information when a task fails
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ErrorMessage {
-    /// 错误消息内容，描述失败的具体原因
-    /// Error message content, describes the specific reason for the failure
-    pub error_msg: String,
-
-    /// 失败时间（单位：秒），记录错误发生的时间戳
-    /// Failure time (in seconds), records the timestamp when the error occurred
-    pub failed_at: u64,
 }
 
 /// 定义任务状态枚举，描述任务的各种可能状态，支持序列化、反序列化和比较
@@ -231,7 +234,7 @@ impl Task {
         Self {
             topic: topic.into(),
             id: id.into(),
-            payload: payload.into(),
+            payload,
             options,
             runtime: TaskRuntime::default(),
         }
@@ -261,32 +264,32 @@ impl Task {
 
     /// 设置任务完成后的保留时间（retention），单位是秒
     /// Specifies how long the task stays after completed in seconds
-    pub fn with_retention(mut self, retention: u64) -> Task {
-        self.options.retention = retention;
+    pub fn with_retention(mut self, retention_sec: u64) -> Task {
+        self.options.retention_sec = retention_sec;
         self
     }
 
     /// 设置任务的重试策略，指定最大重试次数和重试间隔（单位：秒）
     /// Sets the retry strategy for the task, with max retries and retry interval in seconds the behavior for retrying failed tasks
-    pub fn with_retry(mut self, max_retries: u32, interval: u32) -> Task {
+    pub fn with_retry(mut self, max_retries: u32, interval_sec: u32) -> Task {
         self.options.retry = Some(Retry {
             max_retries,
-            interval,
+            interval_sec,
         });
         self
     }
 
     /// 设置任务的超时时间（timeout），单位是秒
     /// Sets the timeout for the task, in seconds
-    pub fn with_timeout(mut self, timeout: u64) -> Task {
-        self.options.timeout = Some(timeout);
+    pub fn with_timeout(mut self, timeout_sec: u64) -> Task {
+        self.options.timeout_sec = Some(timeout_sec);
         self
     }
 
     /// 设置任务的截止时间（deadline），单位是秒
     /// Sets the deadline for the task, in seconds
-    pub fn with_deadline(mut self, deadline: u64) -> Task {
-        self.options.deadline = Some(deadline);
+    pub fn with_deadline(mut self, deadline_sec: u64) -> Task {
+        self.options.deadline_sec = Some(deadline_sec);
         self
     }
 
@@ -303,10 +306,10 @@ impl Default for TaskOptions {
     fn default() -> Self {
         Self {
             priority: 0,
-            retention: 60 * 60 * 24 * 7,
+            retention_sec: 60 * 60 * 24 * 7,
             retry: None,
-            timeout: None,
-            deadline: None,
+            timeout_sec: None,
+            deadline_sec: None,
             scheduled_at: None,
         }
     }
