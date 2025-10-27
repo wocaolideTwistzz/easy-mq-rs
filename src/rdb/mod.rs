@@ -8,7 +8,7 @@ use crate::{
     errors::{Error, Result},
     rdb::{
         constant::{QName, RedisKey, ToQName},
-        scripts::ENQUEUE,
+        scripts::{DEQUEUE, ENQUEUE},
     },
     task::Task,
 };
@@ -79,6 +79,66 @@ pub async fn enqueue(conn: &mut impl ConnectionLike, task: &Task) -> Result<Stri
 // -- KEYS -> [stream1, stream2 ...] (stream: easy-mq:{qname}:stream)
 // -- ARGV[1] -> consumer
 // -- ARGV[2] -> current timestamp in milliseconds
-pub async fn dequeue(conn: &mut impl ConnectionLike, qnames: &[QName]) -> Result<Task> {
-    todo!();
+pub async fn dequeue(
+    conn: &mut impl ConnectionLike,
+    qnames: &[QName],
+    consumer: Option<&str>,
+) -> Result<Task> {
+    let consumer = consumer.unwrap_or("default");
+    let current = chrono::Local::now().timestamp_millis();
+
+    let task = DEQUEUE
+        .key(
+            qnames
+                .into_iter()
+                .map(|qnmae| RedisKey::Stream { qname: qnmae }.to_string())
+                .collect::<Vec<_>>(),
+        )
+        .arg(consumer)
+        .arg(current)
+        .invoke_async(conn)
+        .await?;
+
+    Ok(task)
+}
+
+#[cfg(test)]
+mod test {
+    use deadpool_redis::{Config, Connection};
+
+    use crate::{
+        rdb::{constant::ToQName, dequeue, enqueue},
+        task::Task,
+    };
+
+    async fn new_redis_conn() -> Connection {
+        let pool = Config::from_url("redis://127.0.0.1:6379")
+            .builder()
+            .unwrap()
+            .build()
+            .unwrap();
+
+        pool.get().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_enqueue() {
+        let task = Task::new("test_topic", None);
+
+        let mut conn = new_redis_conn().await;
+
+        let stream_id = enqueue(&mut conn, &task).await.unwrap();
+
+        println!("{} - {}", task.id, stream_id)
+    }
+
+    #[tokio::test]
+    async fn test_dequeue() {
+        let mut conn = new_redis_conn().await;
+
+        let qname = ("test_topic", 0).to_qname();
+        let task = dequeue(&mut conn, &[qname], None).await.unwrap();
+
+        println!("{:?}", task)
+    }
 }

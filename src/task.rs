@@ -198,7 +198,7 @@ pub enum TaskState {
 
     /// 任务成功完成
     /// Task completed successfully
-    Success,
+    Succeed,
 
     /// 任务失败
     /// Task failed
@@ -234,8 +234,8 @@ impl Task {
     /// 创建一个带有指定 id、payload 和选项的 Task 实例
     /// Creates a Task instance with a specified id, payload, and options
     pub fn new_with(
-        id: impl Into<String>,
         topic: impl Into<String>,
+        id: impl Into<String>,
         payload: Option<Vec<u8>>,
         options: TaskOptions,
     ) -> Task {
@@ -323,5 +323,38 @@ impl Default for TaskOptions {
             deadline_ms: None,
             scheduled_at: None,
         }
+    }
+}
+
+impl std::fmt::Display for TaskState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskState::Pending => write!(f, "pending"),
+            TaskState::Active => write!(f, "active"),
+            TaskState::Scheduled => write!(f, "scheduled"),
+            TaskState::Dependent => write!(f, "dependent"),
+            TaskState::Retry => write!(f, "retry"),
+            TaskState::Succeed => write!(f, "succeed"),
+            TaskState::Failed => write!(f, "failed"),
+            TaskState::Canceled => write!(f, "canceled"),
+        }
+    }
+}
+
+impl TryFrom<&str> for TaskState {
+    type Error = crate::errors::Error;
+
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        Ok(match value {
+            "pending" => TaskState::Pending,
+            "active" => TaskState::Active,
+            "scheduled" => TaskState::Scheduled,
+            "dependent" => TaskState::Dependent,
+            "retry" => TaskState::Retry,
+            "succeed" => TaskState::Succeed,
+            "failed" => TaskState::Failed,
+            "canceled" => TaskState::Canceled,
+            other => return Err(crate::errors::Error::UnknownTaskState(other.to_string())),
+        })
     }
 }

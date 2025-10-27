@@ -16,8 +16,8 @@ pub enum Error {
     #[error("task already exists")]
     TaskAlreadyExists,
 
-    #[error("task data not exists")]
-    TaskDataNotExists,
+    #[error("unknown task state: {0}")]
+    UnknownTaskState(String),
 }
 
 pub type Result<T> = std::result::Result<T, crate::errors::Error>;
