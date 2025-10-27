@@ -162,6 +162,10 @@ pub struct TaskRuntime {
     /// Task completion time (in milliseconds), records the timestamp when the task was completed
     pub completed_at_ms: Option<u64>,
 
+    /// 任务在stream中自动生成的ID,为生成的时间戳+序号
+    /// The ID of the task is automatically generated in the stream, which is the generated timestamp + sequence number.
+    pub stream_id: Option<String>,
+
     /// 任务执行结果，可选，存储任务的输出数据（以字节形式）
     /// Task execution result, optional, stores the output data of the task (in bytes)
     pub result: Option<Vec<u8>>,

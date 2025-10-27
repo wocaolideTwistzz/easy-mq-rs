@@ -1,0 +1,6 @@
+{
+    "cSpell.words": [
+        "qname"
+    ],
+    "Lua.diagnostics.globals": ["redis", "KEYS", "ARGV"]
+}

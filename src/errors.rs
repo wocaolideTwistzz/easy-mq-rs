@@ -12,6 +12,12 @@ pub enum Error {
 
     #[error(transparent)]
     RedisError(#[from] RedisError),
+
+    #[error("task already exists")]
+    TaskAlreadyExists,
+
+    #[error("task data not exists")]
+    TaskDataNotExists,
 }
 
 pub type Result<T> = std::result::Result<T, crate::errors::Error>;

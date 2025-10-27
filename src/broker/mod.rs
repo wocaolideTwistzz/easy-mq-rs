@@ -13,16 +13,16 @@ pub trait Broker {
     /// dependent conditions(a certain time or completion of certain tasks) are met)
     /// according to the current state.
     /// The task state must be `Pending` or `Scheduled`.
-    async fn enqueue(&self, task: Task) -> Result<()>;
+    async fn enqueue(&self, task: Task) -> Result<Task>;
 
     /// 尝试从指定话题/话题列表中取出任务，若队列中存在任务，直接返回优先级最高的任务，若不存在，直接返回None.
     ///
     /// Try to dequeue task from the specified topic/topic list. Return the task with highest
     /// priority, return None if there is no task in topics.
-    async fn try_dequeue<I, S>(&self, topics: I) -> Result<Option<Task>>
+    async fn dequeue<I, S>(&self, topics: I) -> Result<Option<Task>>
     where
         I: IntoIterator<Item = S> + Send + Sync,
         S: AsRef<str>;
-}
 
-fn xd() {}
+    async fn success(&self, task_id: &str, ret: Vec<u8>) -> Result<()>;
+}
