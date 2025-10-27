@@ -37,25 +37,25 @@ pub struct TaskOptions {
     /// The default value is 0，and negative number can be used to express higher priority.
     pub priority: i8,
 
-    /// 任务保留时间（单位：秒），用于指定任务在完成后保留的时间 默认保留7天
-    /// Task retention time (in seconds), specifies how long the task stays after completed.
+    /// 任务保留时间（单位：毫秒），用于指定任务在完成后保留的时间 默认保留7天
+    /// Task retention time (in milliseconds), specifies how long the task stays after completed.
     /// The default retention period is 7 days.
-    pub retention_sec: u64,
+    pub retention_ms: u64,
 
     /// 重试策略，可选，定义任务失败后的重试行为 默认不做重试
     /// Retry strategy, optional, defines the behavior for retrying failed tasks
     /// Default is not retry
     pub retry: Option<Retry>,
 
-    /// 任务超时时间（单位：秒），可选，指定任务执行的最大时长 默认不设置超时时间
-    /// Task timeout (in seconds), optional, specifies the maximum duration for task execution.
+    /// 任务超时时间（单位：毫秒），可选，指定任务执行的最大时长 默认不设置超时时间
+    /// Task timeout (in milliseconds), optional, specifies the maximum duration for task execution.
     /// No timeout is set by default
-    pub timeout_sec: Option<u64>,
+    pub timeout_ms: Option<u64>,
 
-    /// 任务截止时间（单位： Unix秒级时间戳），可选，指定任务必须完成的时间点 默认不设置截止时间
-    /// Task deadline (unix timestamp), optional, specifies the time by which the task must be completed
+    /// 任务截止时间（单位： 毫秒级时间戳），可选，指定任务必须完成的时间点 默认不设置截止时间
+    /// Task deadline (in milliseconds), optional, specifies the time by which the task must be completed
     /// No deadline is set by default
-    pub deadline_sec: Option<u64>,
+    pub deadline_ms: Option<u64>,
 
     /// 任务调度时间，可选，指定任务的执行时间或依赖条件
     /// Task scheduled time, optional, specifies when or under what conditions the task should be executed
@@ -70,18 +70,18 @@ pub struct Retry {
     /// Maximum number of retry attempts
     pub max_retries: u32,
 
-    /// 重试间隔时间（单位：秒）
-    /// Retry interval time (in seconds)
-    pub interval_sec: u32,
+    /// 重试间隔时间（单位：毫秒）
+    /// Retry interval time (in milliseconds)
+    pub interval_ms: u32,
 }
 
 /// 定义任务调度时间的枚举类型
 /// Define the ScheduledAt enum for specifying task scheduling time or conditions
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ScheduledAt {
-    /// 指定任务在某个时间戳（单位：秒）执行
-    /// Specifies that the task should be executed at a certain unix timestamp
-    TimestampSec(u64),
+    /// 指定任务在某个时间戳（单位: 毫秒）执行
+    /// Specifies that the task should be executed at a certain timestamp (in milliseconds)
+    TimestampMs(u64),
 
     /// 指定任务在某些其他任务完成后执行
     /// Specifies that the task should be executed after certain other tasks are completed
@@ -121,9 +121,9 @@ pub struct TaskRuntime {
     /// Number of retry attempts, records how many times the task has been retried after failure
     pub retried: u32,
 
-    /// 下次处理时间（单位：秒），表示任务计划执行的时间戳
-    /// Next process time (in seconds), indicates the timestamp when the task is scheduled to be processed
-    pub next_process_at_sec: u64,
+    /// 下次处理时间（单位：毫秒），表示任务计划执行的时间戳
+    /// Next process time (in milliseconds), indicates the timestamp when the task is scheduled to be processed
+    pub next_process_at_ms: u64,
 
     /// 当前任务是否处于活动状态，且没有工作线程对其进行处理。
     /// 一个孤立的任务表示该工作进程已崩溃或遭遇网络故障，无法继续延长租期。
@@ -138,9 +138,9 @@ pub struct TaskRuntime {
     /// This field is only applicable to tasks with TaskStateActive.
     pub is_orphaned: bool,
 
-    /// 最后一次处于`pending`状态, 开始等待执行的时间(单位：毫秒)
-    /// The last time it was in the `pending` state and started waiting for execution. (in milliseconds)
-    pub last_pending_at_ms: Option<u64>,
+    /// 任务创建时间(单位: 毫秒)
+    /// Task creation time (in milliseconds)
+    pub created_at_ms: Option<u64>,
 
     /// 最后一次处于`active`状态, 被某个消费者取出的时间(单位：毫秒)
     /// The last time it was int the `active` state and was retrieved by a  consumer. (in milliseconds)
@@ -159,7 +159,7 @@ pub struct TaskRuntime {
     pub last_err_at_ms: Option<u64>,
 
     /// 任务完成时间（单位：毫秒），记录任务完成的时间戳
-    /// Task completion time (in seconds), records the timestamp when the task was completed
+    /// Task completion time (in milliseconds), records the timestamp when the task was completed
     pub completed_at_ms: Option<u64>,
 
     /// 任务执行结果，可选，存储任务的输出数据（以字节形式）
@@ -176,9 +176,13 @@ pub enum TaskState {
     #[default]
     Pending,
 
-    /// 任务已调度，等待执行
-    /// Task is scheduled, waiting for execution
+    /// 任务为定时任务，等待指定时间再进入Pending状态
+    /// The Task is a scheduled task, waiting for the specified time before entering the Pending state.
     Scheduled,
+
+    /// 任务依赖于其他任务执行完毕，等待指定任务执行完毕后再进入Pending状态
+    /// The task depends on the completion of other tasks and wait for the specified task to complete before entering the Pending state.
+    Dependent,
 
     /// 任务正在执行
     /// Task is currently being executed
@@ -262,42 +266,45 @@ impl Task {
         self
     }
 
-    /// 设置任务完成后的保留时间（retention），单位是秒
-    /// Specifies how long the task stays after completed in seconds
-    pub fn with_retention(mut self, retention_sec: u64) -> Task {
-        self.options.retention_sec = retention_sec;
+    /// 设置任务完成后的保留时间（retention），单位是毫秒
+    /// Specifies how long the task stays after completed in milliseconds
+    pub fn with_retention(mut self, retention_ms: u64) -> Task {
+        self.options.retention_ms = retention_ms;
         self
     }
 
-    /// 设置任务的重试策略，指定最大重试次数和重试间隔（单位：秒）
-    /// Sets the retry strategy for the task, with max retries and retry interval in seconds the behavior for retrying failed tasks
-    pub fn with_retry(mut self, max_retries: u32, interval_sec: u32) -> Task {
+    /// 设置任务的重试策略，指定最大重试次数和重试间隔（单位：毫秒）
+    /// Sets the retry strategy for the task, with max retries and retry interval in milliseconds the behavior for retrying failed tasks
+    pub fn with_retry(mut self, max_retries: u32, interval_ms: u32) -> Task {
         self.options.retry = Some(Retry {
             max_retries,
-            interval_sec,
+            interval_ms,
         });
         self
     }
 
-    /// 设置任务的超时时间（timeout），单位是秒
-    /// Sets the timeout for the task, in seconds
-    pub fn with_timeout(mut self, timeout_sec: u64) -> Task {
-        self.options.timeout_sec = Some(timeout_sec);
+    /// 设置任务的超时时间（timeout），单位是毫秒
+    /// Sets the timeout for the task, in milliseconds
+    pub fn with_timeout(mut self, timeout_ms: u64) -> Task {
+        self.options.timeout_ms = Some(timeout_ms);
         self
     }
 
-    /// 设置任务的截止时间（deadline），单位是秒
-    /// Sets the deadline for the task, in seconds
-    pub fn with_deadline(mut self, deadline_sec: u64) -> Task {
-        self.options.deadline_sec = Some(deadline_sec);
+    /// 设置任务的截止时间（deadline），单位是毫秒
+    /// Sets the deadline for the task, in milliseconds
+    pub fn with_deadline(mut self, deadline_ms: u64) -> Task {
+        self.options.deadline_ms = Some(deadline_ms);
         self
     }
 
     /// 设置任务的执行时间或依赖条件
     /// Sets the scheduled time or dependency condition of the task
     pub fn with_scheduled(mut self, scheduled_at: ScheduledAt) -> Task {
+        match scheduled_at {
+            ScheduledAt::TimestampMs(_) => self.runtime.state = TaskState::Scheduled,
+            ScheduledAt::TasksCompleted(_) => self.runtime.state = TaskState::Dependent,
+        }
         self.options.scheduled_at = Some(scheduled_at);
-        self.runtime.state = TaskState::Scheduled;
         self
     }
 }
@@ -306,10 +313,10 @@ impl Default for TaskOptions {
     fn default() -> Self {
         Self {
             priority: 0,
-            retention_sec: 60 * 60 * 24 * 7,
+            retention_ms: 1000 * 60 * 60 * 24 * 7,
             retry: None,
-            timeout_sec: None,
-            deadline_sec: None,
+            timeout_ms: None,
+            deadline_ms: None,
             scheduled_at: None,
         }
     }
