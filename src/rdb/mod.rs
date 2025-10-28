@@ -2,7 +2,7 @@ pub mod constant;
 pub mod scripts;
 
 use bincode::config;
-use deadpool_redis::redis::aio::ConnectionLike;
+use deadpool_redis::redis::{self, aio::ConnectionLike};
 
 use crate::{
     errors::{Error, Result},
@@ -13,36 +13,29 @@ use crate::{
     task::Task,
 };
 
-// -- `KEYS[1]` -> easy-mq:topics
-// -- `KEYS[2]` -> easy-mq:{topic}:qname
-// -- `KEYS[3]` -> easy-mq:{qname}:task:{task_id}
-// -- `KEYS[4]` -> easy-mq:{qname}:stream
-// -- `KEYS[5]` -> easy-mq:{qname}:deadline
-
-// -- `ARGV[1]` -> topic
-// -- `ARGV[2]` -> qname
-// -- `ARGV[3]` -> task data
-// -- `ARGV[4]` -> current timestamp (in millisecond)
-// -- `ARGV[5]` -> timeout (in millisecond)
-// -- `ARGV[6]` -> deadline timestamp (in millisecond)
-// -- `ARGV[7]` -> max retries
-// -- `ARGV[8]` -> retry interval (in millisecond)
-// -- `ARGV[9]` -> retention (in millisecond)
+// -- `KEYS[1]` -> easy-mq:{topic}:qname
+// -- `KEYS[2]` -> easy-mq:{topic}:{priority}:task:{task_id}
+// -- `KEYS[3]` -> easy-mq:{topic}:{priority}:stream
+// -- `KEYS[4]` -> easy-mq:{topic}:{priority}:deadline
+//
+// -- `ARGV[1]` -> qname - ({topic}:{priority})
+// -- `ARGV[2]` -> task data
+// -- `ARGV[3]` -> current timestamp (in milliseconds)
+// -- `ARGV[4]` -> timeout (in milliseconds)
+// -- `ARGV[5]` -> deadline timestamp (in milliseconds)
+// -- `ARGV[6]` -> max retries
+// -- `ARGV[7]` -> retry interval (in milliseconds)
+// -- `ARGV[8]` -> retention (in milliseconds)
 pub async fn enqueue(conn: &mut impl ConnectionLike, task: &Task) -> Result<String> {
     let task_data = bincode::serde::encode_to_vec(task, config::standard())?;
 
-    let qname = task.to_qname();
-
-    let topic_key = RedisKey::Topics.to_string();
-    let qname_key = RedisKey::QName { topic: &task.topic }.to_string();
-    let task_key = RedisKey::Task {
-        qname: &qname,
-        task_id: &task.id,
-    }
-    .to_string();
-    let stream_key = RedisKey::Stream { qname: &qname }.to_string();
-    let deadline_key = RedisKey::Deadline { qname: &qname }.to_string();
     let current = chrono::Local::now().timestamp_millis();
+
+    let qname = task.to_qname();
+    let task_key = RedisKey::task(&qname, &task.id).to_string();
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let deadline_key = RedisKey::deadline(&qname).to_string();
+
     let timeout = task.options.timeout_ms.unwrap_or_default();
     let deadline = task.options.deadline_ms.unwrap_or_default();
     let (max_retries, retry_interval) = if let Some(retry) = &task.options.retry {
@@ -52,14 +45,11 @@ pub async fn enqueue(conn: &mut impl ConnectionLike, task: &Task) -> Result<Stri
     };
     let retention = task.options.retention_ms;
 
+    // 1. 任务入队
     let ret: String = ENQUEUE
-        .key(topic_key)
-        .key(qname_key)
         .key(task_key)
         .key(stream_key)
         .key(deadline_key)
-        .arg(&task.topic)
-        .arg(&qname)
         .arg(task_data)
         .arg(current)
         .arg(timeout)
@@ -69,32 +59,46 @@ pub async fn enqueue(conn: &mut impl ConnectionLike, task: &Task) -> Result<Stri
         .arg(retention)
         .invoke_async(conn)
         .await?;
-
     if ret == "0" {
         return Err(Error::TaskAlreadyExists);
     }
+
+    // 2. 更新topic时间
+    redis::Cmd::zadd(RedisKey::topics().to_string(), &task.topic, current)
+        .exec_async(conn)
+        .await?;
+
+    // 3. 更新topic下的qname
+    redis::Cmd::hset(
+        RedisKey::qname(&task.topic).to_string(),
+        &task.topic,
+        qname.0,
+    )
+    .exec_async(conn)
+    .await?;
+
     Ok(ret)
 }
 
 // -- KEYS -> [stream1, stream2 ...] (stream: easy-mq:{qname}:stream)
-// -- ARGV[1] -> consumer
+// -- ARGV[1] -> consumer (worker)
 // -- ARGV[2] -> current timestamp in milliseconds
 pub async fn dequeue(
     conn: &mut impl ConnectionLike,
     qnames: &[QName],
-    consumer: Option<&str>,
+    worker: Option<&str>,
 ) -> Result<Task> {
-    let consumer = consumer.unwrap_or("default");
+    let worker = worker.unwrap_or("default");
     let current = chrono::Local::now().timestamp_millis();
 
     let task = DEQUEUE
         .key(
             qnames
-                .into_iter()
-                .map(|qnmae| RedisKey::Stream { qname: qnmae }.to_string())
+                .iter()
+                .map(|qname| RedisKey::stream(qname).to_string())
                 .collect::<Vec<_>>(),
         )
-        .arg(consumer)
+        .arg(worker)
         .arg(current)
         .invoke_async(conn)
         .await?;

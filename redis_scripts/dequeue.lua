@@ -22,7 +22,8 @@ for i = 1, #KEYS do
                 -- Set task state, last active time.
                 redis.call('HSET', task_key,
                     'state', 'active',
-                    'last_active_at', current
+                    'last_active_at', current,
+                    'last_worker', consumer
                 )
 
                 -- 从任务Hash表中返回任务 - easy-mq:{`qname`}:task:{`task_id`}

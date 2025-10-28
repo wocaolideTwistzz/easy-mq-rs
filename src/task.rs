@@ -60,6 +60,15 @@ pub struct TaskOptions {
     /// 任务调度时间，可选，指定任务的执行时间或依赖条件
     /// Task scheduled time, optional, specifies when or under what conditions the task should be executed
     pub scheduled_at: Option<ScheduledAt>,
+
+    /// 定义任务所属的slot,在redis集群模式下,相同slot的任务才可以同时被消费,才可以互相依赖.
+    /// 默认slot为当前的topic,redis非集群模式下无需设置.
+    /// redis 集群模式下,任务出于不同topic但却互相依赖需要设置该值
+    /// Defines the slot which the task belongs. Tasks in the same slot can be consumed at the same time and
+    /// can depend each other in redis cluster mode.
+    /// The default slot is the concurrent topic and does not need to be set in redis non-cluster mode.
+    /// In cluster mode, task from different topics but dependent on each other need to set this value.
+    pub slot: Option<String>,
 }
 
 /// 定义重试策略结构体，包含重试相关参数
@@ -311,6 +320,18 @@ impl Task {
         self.options.scheduled_at = Some(scheduled_at);
         self
     }
+
+    /// 定义任务所属的slot,在redis集群模式下,相同slot的任务才可以同时被消费,才可以互相依赖.
+    /// 默认slot为当前的topic,redis非集群模式下无需设置.
+    /// redis 集群模式下,任务出于不同topic但却互相依赖需要设置该值
+    /// Defines the slot which the task belongs. Tasks in the same slot can be consumed at the same time and
+    /// can depend each other in redis cluster mode.
+    /// The default slot is the concurrent topic and does not need to be set in redis non-cluster mode.
+    /// In cluster mode, task from different topics but dependent on each other need to set this value.
+    pub fn with_slot(mut self, slot: String) -> Task {
+        self.options.slot = Some(slot);
+        self
+    }
 }
 
 impl Default for TaskOptions {
@@ -322,6 +343,7 @@ impl Default for TaskOptions {
             timeout_ms: None,
             deadline_ms: None,
             scheduled_at: None,
+            slot: None,
         }
     }
 }
