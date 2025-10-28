@@ -7,7 +7,7 @@ use deadpool_redis::redis::{self, aio::ConnectionLike};
 use crate::{
     errors::{Error, Result},
     rdb::{
-        constant::{QName, RedisKey, ToQName},
+        constant::{QName, RedisKey},
         scripts::{DEQUEUE, ENQUEUE},
     },
     task::Task,
@@ -31,7 +31,7 @@ pub async fn enqueue(conn: &mut impl ConnectionLike, task: &Task) -> Result<Stri
 
     let current = chrono::Local::now().timestamp_millis();
 
-    let qname = task.to_qname();
+    let qname = QName::from_task(task);
     let task_key = RedisKey::task(&qname, &task.id).to_string();
     let stream_key = RedisKey::stream(&qname).to_string();
     let deadline_key = RedisKey::deadline(&qname).to_string();
@@ -111,7 +111,7 @@ mod test {
     use deadpool_redis::{Config, Connection};
 
     use crate::{
-        rdb::{constant::ToQName, dequeue, enqueue},
+        rdb::{constant::QName, dequeue, enqueue},
         task::Task,
     };
 
@@ -140,7 +140,7 @@ mod test {
     async fn test_dequeue() {
         let mut conn = new_redis_conn().await;
 
-        let qname = ("test_topic", 0).to_qname();
+        let qname = QName::new("test_topic", 0);
         let task = dequeue(&mut conn, &[qname], None).await.unwrap();
 
         println!("{:?}", task)

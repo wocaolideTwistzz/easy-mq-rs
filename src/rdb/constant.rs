@@ -86,26 +86,25 @@ impl std::fmt::Display for QName {
     }
 }
 
-pub trait ToQName {
-    fn to_qname(&self) -> QName;
-}
-
-impl ToQName for &Task {
-    fn to_qname(&self) -> QName {
-        if let Some(slot) = self.options.slot.as_ref() {
-            QName(format!(
-                "{{{}}}:{{{}}}:{{{}}}",
-                slot, self.topic, self.options.priority
-            ))
-        } else {
-            QName(format!("{{{}}}:{{{}}}", self.topic, self.options.priority))
-        }
+impl QName {
+    pub fn new(topic: impl AsRef<str>, priority: i8) -> QName {
+        QName(format!("{{{}}}:{{{}}}", topic.as_ref(), priority))
     }
-}
 
-impl ToQName for (&str, i8) {
-    fn to_qname(&self) -> QName {
-        QName(format!("{{{}}}:{{{}}}", self.0, self.1))
+    pub fn new_with_slot(slot: impl AsRef<str>, topic: impl AsRef<str>, priority: i8) -> QName {
+        QName(format!(
+            "{{{}}}:{{{}}}:{{{}}}",
+            slot.as_ref(),
+            topic.as_ref(),
+            priority
+        ))
+    }
+
+    pub fn from_task(task: &Task) -> QName {
+        match task.options.slot.as_ref() {
+            Some(slot) => QName::new_with_slot(slot, &task.topic, task.options.priority),
+            None => QName::new(&task.topic, task.options.priority),
+        }
     }
 }
 
