@@ -170,7 +170,7 @@ impl FromRedisValue for Task {
 
             return Ok(task);
         }
-        todo!()
+        Err(FromRedisValueError::TaskValueIsNotAMap.into())
     }
 }
 
@@ -189,17 +189,14 @@ impl RedisValueExt for Value {
             Value::VerbatimString { format: _, text } => Ok(Cow::Borrowed(text)),
             Value::Double(val) => Ok(Cow::Owned(val.to_string())),
             Value::Int(val) => Ok(Cow::Owned(val.to_string())),
-            _ => Err(RedisError::from((ErrorKind::TypeError, "not a str"))),
+            _ => Err(FromRedisValueError::NotAStr.into()),
         }
     }
 
     fn as_vec(&self) -> RedisResult<&[u8]> {
         match self {
             Value::BulkString(bytes) => Ok(bytes),
-            _ => Err(RedisError::from((
-                ErrorKind::TypeError,
-                "not a bulk string",
-            ))),
+            _ => Err(FromRedisValueError::NotABulkString.into()),
         }
     }
 }
@@ -220,6 +217,15 @@ pub enum FromRedisValueError {
 
     #[error("decode task state failed: {0}")]
     DecodeTaskStateError(#[from] crate::errors::Error),
+
+    #[error("not a str")]
+    NotAStr,
+
+    #[error("not a bulk string")]
+    NotABulkString,
+
+    #[error("task value is not a map")]
+    TaskValueIsNotAMap,
 }
 
 impl From<FromRedisValueError> for RedisError {
@@ -244,6 +250,13 @@ impl From<FromRedisValueError> for RedisError {
                 "decode task state failed",
                 e.to_string(),
             )),
+            FromRedisValueError::NotAStr => RedisError::from((ErrorKind::TypeError, "not a str")),
+            FromRedisValueError::NotABulkString => {
+                RedisError::from((ErrorKind::TypeError, "not a bulk string"))
+            }
+            FromRedisValueError::TaskValueIsNotAMap => {
+                RedisError::from((ErrorKind::TypeError, "task value is not a map"))
+            }
         }
     }
 }
