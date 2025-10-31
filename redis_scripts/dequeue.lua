@@ -12,8 +12,9 @@ for i = 1, #KEYS do
     local stream_key = KEYS[i]
     -- 使用默认消费者组 `default` 从队列中取出一个任务
     -- Dequeue a task using the default consumer group `default`
-    local msg = redis.call('XREADGROUP', 'GROUP', 'default', consumer, 'COUNT', 1, 'STREAMS', stream_key, '>')
-    if msg and #msg > 0 then
+    local msg = redis.pcall('XREADGROUP', 'GROUP', 'default', consumer, 'COUNT', 1, 'STREAMS', stream_key, '>')
+
+    if type(msg) == "table" and not msg.err and msg[1] then
         local fields = msg[1][2][1][2]
         for j = 1, #fields, 2 do
             if fields[j] == 'task_key' then

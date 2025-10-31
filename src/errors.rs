@@ -18,6 +18,24 @@ pub enum Error {
 
     #[error("unknown task state: {0}")]
     UnknownTaskState(String),
+
+    #[error("scheduled at time not set")]
+    ScheduledAtTimeNotSet,
+
+    #[error("dependent tasks not set")]
+    DependentTasksNotSet,
+
+    #[error("missing stream id")]
+    MissingStreamID,
+
+    #[error("retry not set")]
+    RetryNotSet,
+
+    #[error("retry has exceeded")]
+    RetryHasExceeded,
+
+    #[error("task not found")]
+    TaskNotFound,
 }
 
 pub type Result<T> = std::result::Result<T, crate::errors::Error>;

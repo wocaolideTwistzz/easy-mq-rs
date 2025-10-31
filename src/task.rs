@@ -94,28 +94,33 @@ pub enum ScheduledAt {
 
     /// 指定任务在某些其他任务完成后执行
     /// Specifies that the task should be executed after certain other tasks are completed
-    TasksCompleted(Vec<TaskCompleted>),
+    DependsOn(Vec<CompletedTask>),
 }
 
-/// 定义任务完成状态的枚举类型
-/// Define the TaskCompleted enum for representing the completion status of tasks
+/// 定义依赖完成的任务.
+/// Define the task to be completed by the dependency.
 #[derive(Debug, Serialize, Deserialize)]
-pub enum TaskCompleted {
-    /// 任务完成（不区分成功或失败）- 任务ID
-    /// Task completed (regardless of success or failure) - with task id
-    Completed(String),
+pub struct CompletedTask {
+    /// 任务主题，用于标识任务的类别或分组
+    /// Task topic, used to identify the category or group of the task
+    pub topic: String,
 
-    /// 任务成功完成 - 任务ID
-    /// Task completed successfully - with task id
-    Success(String),
+    /// 任务的唯一标识符
+    /// Unique identifier for the task
+    pub id: String,
 
-    /// 任务失败 - 任务ID
-    /// Task failed - with task id
-    Failed(String),
+    /// 任务优先级
+    /// Task priority
+    pub priority: i8,
 
-    /// 任务被取消 - 任务ID
-    /// Task was canceled - with task id
-    Canceled(String),
+    /// 定义任务所属的slot,在redis集群模式下,相同slot的任务才可以同时被消费,才可以互相依赖.
+    /// Defines the slot which the task belongs. Tasks in the same slot can be consumed at the same time and
+    /// can depend each other in redis cluster mode.
+    pub slot: Option<String>,
+
+    /// 任务完成的状态.
+    /// Task completion state.
+    pub state: TaskCompletedState,
 }
 
 /// 定义任务运行时结构体，包含任务的运行时状态信息
@@ -129,10 +134,6 @@ pub struct TaskRuntime {
     /// 已重试次数，记录任务失败后尝试重试的次数
     /// Number of retry attempts, records how many times the task has been retried after failure
     pub retried: u32,
-
-    /// 下次处理时间（单位：毫秒），表示任务计划执行的时间戳
-    /// Next process time (in milliseconds), indicates the timestamp when the task is scheduled to be processed
-    pub next_process_at_ms: u64,
 
     /// 当前任务是否处于活动状态，且没有工作线程对其进行处理。
     /// 一个孤立的任务表示该工作进程已崩溃或遭遇网络故障，无法继续延长租期。
@@ -151,8 +152,16 @@ pub struct TaskRuntime {
     /// Task creation time (in milliseconds)
     pub created_at_ms: Option<u64>,
 
-    /// 最后一次处于`active`状态, 被某个消费者取出的时间(单位：毫秒)
-    /// The last time it was int the `active` state and was retrieved by a  consumer. (in milliseconds)
+    /// 下次处理时间（单位：毫秒），表示任务计划执行的时间戳
+    /// Next process time (in milliseconds), indicates the timestamp when the task is scheduled to be processed
+    pub next_process_at_ms: u64,
+
+    /// 最后一次处于`pending`状态, 等待消费者消费(单位：毫秒)
+    /// The last time it entered `pending` state, awaiting a consumer's purchase (in milliseconds)
+    pub last_pending_at_ms: Option<u64>,
+
+    /// 最后一次进入`active`状态, 被某个消费者取出的时间(单位：毫秒)
+    /// The last time it entered `active` state and was retrieved by a  consumer. (in milliseconds)
     pub last_active_at_ms: Option<u64>,
 
     /// 最后一次执行该任务的worker.
@@ -315,7 +324,7 @@ impl Task {
     pub fn with_scheduled(mut self, scheduled_at: ScheduledAt) -> Task {
         match scheduled_at {
             ScheduledAt::TimestampMs(_) => self.runtime.state = TaskState::Scheduled,
-            ScheduledAt::TasksCompleted(_) => self.runtime.state = TaskState::Dependent,
+            ScheduledAt::DependsOn(_) => self.runtime.state = TaskState::Dependent,
         }
         self.options.scheduled_at = Some(scheduled_at);
         self
@@ -332,6 +341,35 @@ impl Task {
         self.options.slot = Some(slot);
         self
     }
+
+    pub fn to_completed_task(&self, state: TaskCompletedState) -> CompletedTask {
+        CompletedTask {
+            topic: self.topic.clone(),
+            id: self.id.clone(),
+            priority: self.options.priority,
+            slot: self.options.slot.clone(),
+            state,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskCompletedState {
+    /// 任务完成的任意状态 succeed/failed/canceled
+    /// Any state of task completion: succeed/failed/canceled.
+    Any,
+
+    /// 任务成功完成
+    /// Task completed successfully
+    Succeed,
+
+    /// 任务失败
+    /// Task failed
+    Failed,
+
+    /// 任务被取消
+    /// Task was canceled
+    Canceled,
 }
 
 impl Default for TaskOptions {
@@ -350,16 +388,7 @@ impl Default for TaskOptions {
 
 impl std::fmt::Display for TaskState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TaskState::Pending => write!(f, "pending"),
-            TaskState::Active => write!(f, "active"),
-            TaskState::Scheduled => write!(f, "scheduled"),
-            TaskState::Dependent => write!(f, "dependent"),
-            TaskState::Retry => write!(f, "retry"),
-            TaskState::Succeed => write!(f, "succeed"),
-            TaskState::Failed => write!(f, "failed"),
-            TaskState::Canceled => write!(f, "canceled"),
-        }
+        write!(f, "{}", self.as_ref())
     }
 }
 
@@ -378,5 +407,46 @@ impl TryFrom<&str> for TaskState {
             "canceled" => TaskState::Canceled,
             other => return Err(crate::errors::Error::UnknownTaskState(other.to_string())),
         })
+    }
+}
+
+impl AsRef<str> for TaskState {
+    fn as_ref(&self) -> &str {
+        match self {
+            TaskState::Pending => "pending",
+            TaskState::Active => "active",
+            TaskState::Canceled => "canceled",
+            TaskState::Dependent => "dependent",
+            TaskState::Failed => "failed",
+            TaskState::Succeed => "succeed",
+            TaskState::Retry => "retry",
+            TaskState::Scheduled => "scheduled",
+        }
+    }
+}
+
+impl AsRef<str> for TaskCompletedState {
+    fn as_ref(&self) -> &str {
+        match self {
+            TaskCompletedState::Any => "*",
+            TaskCompletedState::Canceled => "canceled",
+            TaskCompletedState::Failed => "failed",
+            TaskCompletedState::Succeed => "succeed",
+        }
+    }
+}
+
+impl std::fmt::Display for TaskCompletedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
+}
+
+impl TaskState {
+    pub fn is_completed(&self) -> bool {
+        matches!(
+            self,
+            TaskState::Succeed | TaskState::Failed | TaskState::Canceled
+        )
     }
 }

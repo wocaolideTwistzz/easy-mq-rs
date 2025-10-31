@@ -2,10 +2,12 @@ use std::{borrow::Cow, collections::HashMap};
 
 use bincode::config;
 use deadpool_redis::redis::{
-    ErrorKind, FromRedisValue, RedisError, RedisResult, Value, from_redis_value,
+    ErrorKind, FromRedisValue, RedisError, RedisResult, ToRedisArgs, Value, from_redis_value,
 };
 
-use crate::task::Task;
+use crate::task::{CompletedTask, ScheduledAt, Task, TaskState};
+
+pub const DEFAULT_WORKER: &str = "default";
 
 #[derive(Debug)]
 pub struct QName(pub String);
@@ -106,6 +108,13 @@ impl QName {
             None => QName::new(&task.topic, task.options.priority),
         }
     }
+
+    pub fn from_completed_task(task: &CompletedTask) -> QName {
+        match task.slot.as_ref() {
+            Some(slot) => QName::new_with_slot(slot, &task.topic, task.priority),
+            None => QName::new(&task.topic, task.priority),
+        }
+    }
 }
 
 impl FromRedisValue for Task {
@@ -135,22 +144,23 @@ impl FromRedisValue for Task {
                 .try_into()
                 .map_err(FromRedisValueError::DecodeTaskStateError)?;
 
-            task.runtime.stream_id = from_redis_value(
-                map.get("stream_id")
-                    .ok_or(FromRedisValueError::MissingStreamId)?,
-            )?;
-
+            if let Some(stream_id) = map.get("stream_id") {
+                task.runtime.stream_id = from_redis_value(stream_id)?
+            }
             if let Some(retried) = map.get("retried") {
                 task.runtime.retried = from_redis_value(retried)?;
-            }
-            if let Some(next_process_at) = map.get("next_process_at") {
-                task.runtime.next_process_at_ms = from_redis_value(next_process_at)?;
             }
             if let Some(is_orphaned) = map.get("is_orphaned") {
                 task.runtime.is_orphaned = from_redis_value(is_orphaned)?;
             }
             if let Some(created_at) = map.get("created_at") {
                 task.runtime.created_at_ms = from_redis_value(created_at)?;
+            }
+            if let Some(next_process_at) = map.get("next_process_at") {
+                task.runtime.next_process_at_ms = from_redis_value(next_process_at)?;
+            }
+            if let Some(last_pending_at) = map.get("last_pending_at") {
+                task.runtime.last_pending_at_ms = from_redis_value(last_pending_at)?;
             }
             if let Some(last_active_at) = map.get("last_active_at") {
                 task.runtime.last_active_at_ms = from_redis_value(last_active_at)?;
@@ -167,7 +177,9 @@ impl FromRedisValue for Task {
             if let Some(completed_at) = map.get("completed_at") {
                 task.runtime.completed_at_ms = from_redis_value(completed_at)?;
             }
-
+            if let Some(result) = map.get("result") {
+                task.runtime.result = from_redis_value(result)?;
+            }
             return Ok(task);
         }
         Err(FromRedisValueError::TaskValueIsNotAMap.into())
@@ -209,9 +221,6 @@ pub enum FromRedisValueError {
     #[error("missing task state")]
     MissingTaskState,
 
-    #[error("missing stream id")]
-    MissingStreamId,
-
     #[error("decode task data failed: {0}")]
     DecodeTaskDataError(#[from] bincode::error::DecodeError),
 
@@ -237,9 +246,6 @@ impl From<FromRedisValueError> for RedisError {
             FromRedisValueError::MissingTaskState => {
                 RedisError::from((ErrorKind::ParseError, "missing task state"))
             }
-            FromRedisValueError::MissingStreamId => {
-                RedisError::from((ErrorKind::ParseError, "missing stream id"))
-            }
             FromRedisValueError::DecodeTaskDataError(e) => RedisError::from((
                 ErrorKind::ParseError,
                 "decode task data failed",
@@ -258,5 +264,238 @@ impl From<FromRedisValueError> for RedisError {
                 RedisError::from((ErrorKind::TypeError, "task value is not a map"))
             }
         }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RedisTaskArgs<'a> {
+    pub task: &'a Task,
+
+    pub current: i64,
+
+    pub task_data: Option<Vec<u8>>,
+
+    pub scheduled_at: Option<u64>,
+
+    pub dependent: Option<Vec<(String, String)>>,
+}
+
+impl<'a> ToRedisArgs for RedisTaskArgs<'a> {
+    fn write_redis_args<W>(&self, out: &mut W)
+    where
+        W: ?Sized + deadpool_redis::redis::RedisWrite,
+    {
+        match self.task.runtime.state {
+            TaskState::Pending => {
+                self.write_task_msg(out);
+            }
+            TaskState::Scheduled => {
+                self.write_task_msg(out);
+                // -- `ARGV[8]` -> scheduled (in milliseconds)
+                self.scheduled_at.write_redis_args(out);
+            }
+            TaskState::Dependent => {
+                self.write_task_msg(out);
+                // -- `ARGV[8..]` -> field: task_key; value: task_state
+                self.dependent.write_redis_args(out);
+            }
+            TaskState::Succeed => {
+                self.write_task_complete(out);
+                // -- optional - `ARGV[5]` -> result
+                self.task.runtime.result.write_redis_args(out);
+            }
+            TaskState::Failed | TaskState::Canceled => {
+                self.write_task_complete(out);
+                // -- optional - `ARGV[5]` -> error message
+                self.task.runtime.last_err.write_redis_args(out);
+            }
+            TaskState::Retry => {
+                self.write_task_retry(out);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Task> for RedisTaskArgs<'a> {
+    type Error = crate::errors::Error;
+
+    fn try_from(value: &'a Task) -> Result<Self, Self::Error> {
+        let mut args = RedisTaskArgs {
+            task: value,
+            task_data: None,
+            current: chrono::Local::now().timestamp_millis(),
+            scheduled_at: None,
+            dependent: None,
+        };
+
+        match value.runtime.state {
+            TaskState::Pending => {
+                args.task_data = Some(bincode::serde::encode_to_vec(value, config::standard())?)
+            }
+            TaskState::Scheduled => {
+                args.task_data = Some(bincode::serde::encode_to_vec(value, config::standard())?);
+                match value.options.scheduled_at.as_ref() {
+                    Some(ScheduledAt::TimestampMs(t)) => args.scheduled_at = Some(*t),
+                    _ => return Err(crate::errors::Error::ScheduledAtTimeNotSet),
+                }
+            }
+            TaskState::Dependent => match value.options.scheduled_at.as_ref() {
+                Some(ScheduledAt::DependsOn(tasks)) => {
+                    args.task_data =
+                        Some(bincode::serde::encode_to_vec(value, config::standard())?);
+                    args.dependent = Some(
+                        tasks
+                            .iter()
+                            .map(|task| {
+                                let qname = QName::from_completed_task(task);
+                                (
+                                    RedisKey::task(&qname, &task.id).to_string(),
+                                    task.state.to_string(),
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+                _ => return Err(crate::errors::Error::DependentTasksNotSet),
+            },
+            TaskState::Retry => {
+                if value.runtime.stream_id.is_none() {
+                    return Err(crate::errors::Error::MissingStreamID);
+                }
+                match value.options.retry.as_ref() {
+                    Some(retry) => {
+                        if retry.max_retries <= value.runtime.retried {
+                            return Err(crate::errors::Error::RetryHasExceeded);
+                        }
+                    }
+                    None => return Err(crate::errors::Error::RetryNotSet),
+                }
+            }
+            TaskState::Succeed | TaskState::Canceled | TaskState::Failed => {
+                if value.runtime.stream_id.is_none() {
+                    return Err(crate::errors::Error::MissingStreamID);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(args)
+    }
+}
+
+/// -- `ARGV[1]` -> task data
+/// -- `ARGV[2]` -> current timestamp (in milliseconds)
+/// -- `ARGV[3]` -> timeout (in milliseconds)
+/// -- `ARGV[4]` -> deadline timestamp (in milliseconds)
+/// -- `ARGV[5]` -> max retries
+/// -- `ARGV[6]` -> retry interval (in milliseconds)
+/// -- `ARGV[7]` -> retention (in milliseconds)
+impl<'a> RedisTaskArgs<'a> {
+    fn write_task_msg<W>(&self, out: &mut W)
+    where
+        W: ?Sized + deadpool_redis::redis::RedisWrite,
+    {
+        // -- `ARGV[1]` -> task data
+        self.task_data.write_redis_args(out);
+        // -- `ARGV[2]` -> current timestamp (in milliseconds)
+        self.current.write_redis_args(out);
+        // -- `ARGV[3]` -> timeout (in milliseconds)
+        self.task
+            .options
+            .timeout_ms
+            .unwrap_or_default()
+            .write_redis_args(out);
+        // -- `ARGV[4]` -> deadline timestamp (in milliseconds)
+        self.task
+            .options
+            .deadline_ms
+            .unwrap_or_default()
+            .write_redis_args(out);
+        // -- `ARGV[5]` -> max retries
+        self.task
+            .options
+            .retry
+            .as_ref()
+            .map(|v| v.max_retries)
+            .unwrap_or_default()
+            .write_redis_args(out);
+        // -- `ARGV[6]` -> retry interval (in milliseconds)
+        self.task
+            .options
+            .retry
+            .as_ref()
+            .map(|v| v.interval_ms)
+            .unwrap_or_default()
+            .write_redis_args(out);
+        // -- `ARGV[7]` -> retention (in milliseconds)
+        self.task.options.retention_ms.write_redis_args(out);
+    }
+
+    /// -- `ARGV[1]` -> stream id
+    /// -- `ARGV[2]` -> task completed state (succeed/failed/canceled)
+    /// -- `ARGV[3]` -> current timestamp (in milliseconds)
+    /// -- `ARGV[4]` -> archive expire timestamp (in milliseconds)
+    fn write_task_complete<W>(&self, out: &mut W)
+    where
+        W: ?Sized + deadpool_redis::redis::RedisWrite,
+    {
+        //  -- `ARGV[1]` -> stream id
+        self.task.runtime.stream_id.write_redis_args(out);
+        // -- `ARGV[2]` -> current timestamp (in milliseconds)
+        self.current.write_redis_args(out);
+        // -- `ARGV[3]` -> task completed state (succeed/failed/canceled)
+        self.task.runtime.state.as_ref().write_redis_args(out);
+        let archive_expired_at = self.current + self.task.options.retention_ms as i64;
+        // -- `ARGV[4]` -> archive expire timestamp (in milliseconds)
+        archive_expired_at.write_redis_args(out);
+    }
+
+    /// -- `ARGV[1]` -> stream_id
+    /// -- `ARGV[2]` -> current timestamp (in milliseconds)
+    /// -- `ARGV[3]` -> retried
+    /// -- `ARGV[4]` -> next_process_at
+    /// -- `ARGV[5]` -> timeout (in milliseconds)
+    /// -- `ARGV[6]` -> max retries
+    /// -- `ARGV[7]` -> retry interval (in milliseconds)
+    /// -- `ARGV[8]` -> optional - error msg
+    fn write_task_retry<W>(&self, out: &mut W)
+    where
+        W: ?Sized + deadpool_redis::redis::RedisWrite,
+    {
+        // -- `ARGV[1]` -> stream_id
+        self.task.runtime.stream_id.write_redis_args(out);
+        // -- `ARGV[2]` -> current timestamp (in milliseconds)
+        self.current.write_redis_args(out);
+        // -- `ARGV[3]` -> retried
+        (self.task.runtime.retried + 1).write_redis_args(out);
+        // -- `ARGV[4]` -> next_process_at
+        (self.current
+            + self
+                .task
+                .options
+                .retry
+                .as_ref()
+                .map(|v| v.interval_ms as i64)
+                .unwrap_or_default())
+        .write_redis_args(out);
+        // -- `ARGV[5]` -> timeout (in milliseconds)
+        self.task.options.timeout_ms.write_redis_args(out);
+        // -- `ARGV[6]` -> max retries
+        self.task
+            .options
+            .retry
+            .as_ref()
+            .map(|v| v.max_retries)
+            .write_redis_args(out);
+        // -- `ARGV[7]` -> retry interval (in milliseconds)
+        self.task
+            .options
+            .retry
+            .as_ref()
+            .map(|v| v.interval_ms)
+            .write_redis_args(out);
+        // -- `ARGV[8]` -> optional - error msg
+        self.task.runtime.last_err.write_redis_args(out);
     }
 }
