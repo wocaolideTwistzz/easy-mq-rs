@@ -11,7 +11,7 @@ local stream_key = KEYS[2]
 local archive_key = KEYS[3]
 local deadline_key = KEYS[4]
 
-local current = ARGV[1]
+local current = tonumber(ARGV[1]) or 0
 local qname = ARGV[2]
 
 local cursor = '0'
@@ -68,7 +68,7 @@ local function handle_cancel(dependent_task_key)
         'state', 'canceled',
         'completed_at', current,
         'last_err_at', current,
-        'last_err', 'Dependence can never be satisfied'
+        'last_err', 'dependence can never be satisfied'
     )
 end
 
@@ -88,11 +88,12 @@ local function handle_satisfy(dependent_task_key)
 
     -- 获取任务参数
     -- get task args.
-    local task_args = redis.call('HMGET', task_key, 'retried', 'max_retries', 'timeout', 'retry_interval')
+    local task_args = redis.call('HMGET', task_key, 'retried', 'max_retries', 'timeout', 'retry_interval', 'retention')
     local retried = tonumber(task_args[1]) or 0
     local max_retries = tonumber(task_args[2]) or 0
     local timeout = tonumber(task_args[3]) or 0
     local retry_interval = tonumber(task_args[4]) or 0
+    local retention = tonumber(task_args[5]) or 0
 
     -- 将任务放入 `stream` 消息队列
     -- move task to `stream` message queue
@@ -101,7 +102,8 @@ local function handle_satisfy(dependent_task_key)
         'retried', retried,
         'max_retries', max_retries,
         'retry_interval', retry_interval,
-        'timeout', timeout
+        'timeout', timeout,
+        'retention', retention
     )
 
     -- 更新任务状态为pending...
@@ -160,20 +162,23 @@ repeat
             redis.call('HDEL', dependent_task_key, unpack(completed_tasks))
         end
     end
+
+    -- 清理`dependent`
+    -- Clean up `dependent`
+    if #to_remove_dep_keys > 0 then
+        redis.call('DEL', unpack(to_remove_dep_keys))
+        redis.call('SREM', dependent_key, unpack(to_remove_dep_keys))
+        to_remove_dep_keys = {}
+    end
+
+    -- 更新存档过期时间
+    -- Update archive timeout
+    if #to_archive_args > 0 then
+        redis.call('ZADD', archive_key, unpack(to_archive_args))
+        to_archive_args = {}
+    end
 until cursor == '0'
 
--- 清理`dependent`
--- Clean up `dependent`
-if #to_remove_dep_keys > 0 then
-    redis.call('DEL', unpack(to_remove_dep_keys))
-    redis.call('SREM', dependent_key, unpack(to_remove_dep_keys))
-end
-
--- 更新存档过期时间
--- Update archive timeout
-if #to_archive_args > 0 then
-    redis.call('ZADD', archive_key, unpack(to_archive_args))
-end
 
 -- 创建任务队列默认消费者组.
 -- Create a default consumer group for the task queue.
@@ -181,5 +186,7 @@ if satisfy_count > 0 then
     redis.pcall('XGROUP', 'CREATE', stream_key, 'default', 0)
 end
 
-
+-- 返回满足依赖条件的任务数,永远无法满足导致取消的任务数
+-- Returns the number of tasks that satisfy the dependency conditions,
+-- and the number of tasks that are canceled because the condition can never be met.
 return { satisfy_count, canceled_count }

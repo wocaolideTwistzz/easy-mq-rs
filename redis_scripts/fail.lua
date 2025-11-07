@@ -3,7 +3,7 @@
 -- `KEYS[3]` -> easy-mq:`qname`:scheduled
 -- `KEYS[4]` -> easy-mq:`qname`:archive
 -- `KEYS[5]` -> easy-mq:`qname`:deadline
-
+-- `KEYS[6]` -> easy-mq:`qname`:archive_stream
 
 -- `ARGV[1]` -> stream id
 -- `ARGV[2]` -> current timestamp (in milliseconds)
@@ -14,9 +14,10 @@ local stream_key = KEYS[2]
 local scheduled_key = KEYS[3]
 local archive_key = KEYS[4]
 local deadline_key = KEYS[5]
+local archive_stream_key = KEYS[6]
 
 local stream_id = ARGV[1]
-local current = tonumber(ARGV[2])
+local current = tonumber(ARGV[2]) or 0
 local err_msg = ARGV[3]
 
 -- 1. 将当前消息队列中的当前任务标记为已完成
@@ -37,6 +38,7 @@ local timeout = tonumber(values[5]) or 0
 local deadline = tonumber(values[6]) or 0
 
 if retried < max_retries then
+    redis.call('ZADD', archive_stream_key, 0, stream_id)
     -- 3. 需要重试.
     -- 3. need to retry.
     retried = retried + 1
@@ -63,7 +65,8 @@ if retried < max_retries then
             'task_key', task_key,
             'timeout', timeout,
             'max_retries', max_retries,
-            'retry_interval', retry_interval
+            'retry_interval', retry_interval,
+            'retention', retention
         )
 
         -- 创建任务队列默认消费者组.
@@ -78,7 +81,9 @@ if retried < max_retries then
             'next_process_at', current,
             'stream_id', new_stream_id,
             'last_err_at', current,
-            'err_msg', err_msg
+            'err_msg', err_msg,
+            'last_pending_at', current,
+            'last_err', err_msg
         )
         return new_stream_id
     end
@@ -87,9 +92,11 @@ else
     -- 4. No need to retry, archive directly
     local archive_expired_at = current + retention
     redis.call('ZADD', archive_key, archive_expired_at, task_key)
+    redis.call('ZADD', archive_stream_key, archive_expired_at, stream_id)
     redis.call('HSET', task_key,
         'state', 'failed',
         'last_err_at', current,
+        'last_err', err_msg,
         'completed_at', current,
         'err_msg', err_msg
     )

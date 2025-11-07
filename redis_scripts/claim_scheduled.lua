@@ -21,11 +21,12 @@ end
 for _, task_key in ipairs(tasks) do
     -- 2. 获取任务参数
     -- 2. get task args.
-    local task_args = redis.call('HMGET', task_key, 'retried', 'max_retries', 'timeout', 'retry_interval')
+    local task_args = redis.call('HMGET', task_key, 'retried', 'max_retries', 'timeout', 'retry_interval', 'retention')
     local retried = tonumber(task_args[1]) or 0
     local max_retries = tonumber(task_args[2]) or 0
     local timeout = tonumber(task_args[3]) or 0
     local retry_interval = tonumber(task_args[4]) or 0
+    local retention = tonumber(task_args[5]) or 0
 
     -- 3. 将任务放入 `stream` 消息队列
     -- 3. move task to `stream` message queue
@@ -34,8 +35,8 @@ for _, task_key in ipairs(tasks) do
         'retried', retried,
         'max_retries', max_retries,
         'retry_interval', retry_interval,
-        'last_pending_at', current,
-        'timeout', timeout
+        'timeout', timeout,
+        'retention', retention
     )
 
     -- 4. 将任务状态设置为 `pending`

@@ -33,12 +33,12 @@ local dependent_task_key = KEYS[3]
 local deadline_key = KEYS[4]
 
 local task_data = ARGV[1]
-local current = tonumber(ARGV[2])
-local timeout = tonumber(ARGV[3])
-local deadline = tonumber(ARGV[4])
-local max_retries = tonumber(ARGV[5])
-local retry_interval = tonumber(ARGV[6])
-local retention = tonumber(ARGV[7])
+local current = ARGV[2]
+local timeout = ARGV[3]
+local deadline = tonumber(ARGV[4]) or 0
+local max_retries = ARGV[5]
+local retry_interval = ARGV[6]
+local retention = ARGV[7]
 
 -- 2. 存储任务数据
 -- 2. Store task data

@@ -5,13 +5,17 @@ use deadpool_redis::redis::{
     ErrorKind, FromRedisValue, RedisError, RedisResult, ToRedisArgs, Value, from_redis_value,
 };
 
-use crate::task::{CompletedTask, ScheduledAt, Task, TaskState};
+use crate::{
+    model::{Queue, QueueInfo, Stats},
+    task::{CompletedTask, ScheduledAt, Task, TaskState},
+};
 
 pub const DEFAULT_WORKER: &str = "default";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QName(pub String);
 
+#[derive(Debug, Clone)]
 pub enum RedisKey<'a> {
     Topics,
     QName { topic: &'a str },
@@ -21,6 +25,7 @@ pub enum RedisKey<'a> {
     Dependent { qname: &'a QName },
     DependentTask { qname: &'a QName, task_id: &'a str },
     Archive { qname: &'a QName },
+    ArchiveStream { qname: &'a QName },
     Deadline { qname: &'a QName },
 }
 
@@ -57,6 +62,10 @@ impl<'a> RedisKey<'a> {
         Self::Archive { qname }
     }
 
+    pub fn archive_stream(qname: &'a QName) -> RedisKey<'a> {
+        Self::ArchiveStream { qname }
+    }
+
     pub fn deadline(qname: &'a QName) -> RedisKey<'a> {
         Self::Deadline { qname }
     }
@@ -77,6 +86,7 @@ impl<'a> std::fmt::Display for RedisKey<'a> {
                 write!(f, "easy-mq:{}:dependent:{{{}}}", qname, task_id)
             }
             RedisKey::Archive { qname } => write!(f, "easy-mq:{}:archive", qname),
+            RedisKey::ArchiveStream { qname } => write!(f, "easy-mq:{}:archive_stream", qname),
             RedisKey::Deadline { qname } => write!(f, "easy-mq:{}:deadline", qname),
         }
     }
@@ -101,19 +111,76 @@ impl QName {
             priority
         ))
     }
+}
 
-    pub fn from_task(task: &Task) -> QName {
+impl From<&Task> for QName {
+    fn from(task: &Task) -> Self {
         match task.options.slot.as_ref() {
             Some(slot) => QName::new_with_slot(slot, &task.topic, task.options.priority),
             None => QName::new(&task.topic, task.options.priority),
         }
     }
+}
 
-    pub fn from_completed_task(task: &CompletedTask) -> QName {
+impl From<&CompletedTask> for QName {
+    fn from(task: &CompletedTask) -> Self {
         match task.slot.as_ref() {
             Some(slot) => QName::new_with_slot(slot, &task.topic, task.priority),
             None => QName::new(&task.topic, task.priority),
         }
+    }
+}
+
+impl From<&Queue> for QName {
+    fn from(queue: &Queue) -> Self {
+        match queue.slot.as_ref() {
+            Some(slot) => Self::new_with_slot(slot, &queue.topic, queue.priority),
+            None => Self::new(&queue.topic, queue.priority),
+        }
+    }
+}
+
+impl From<&QueueInfo> for QName {
+    fn from(queue: &QueueInfo) -> Self {
+        queue.as_ref().into()
+    }
+}
+
+impl Queue {
+    pub fn try_from_redis(s: &str, topic: &str) -> crate::errors::Result<Queue> {
+        let last_colon_index = s.rfind(':').ok_or(crate::errors::Error::InvalidQueueName)?;
+        let priority = s[last_colon_index + 1..].trim_matches(|c| c == '{' || c == '}');
+
+        // {topic}:{priority} or {slot}:{topic}:{priority}
+        let topic_index = last_colon_index - topic.len() - 1;
+        if last_colon_index < topic.len() + 1 {
+            return Err(crate::errors::Error::InvalidQueueName);
+        }
+
+        if s[topic_index..last_colon_index]
+            .strip_suffix('}')
+            .is_none_or(|s2| s2 != topic)
+        {
+            return Err(crate::errors::Error::InvalidQueueName);
+        }
+
+        let slot = if topic_index > 1 {
+            // {slot}:{`topic_index`
+            if topic_index < 4 {
+                return Err(crate::errors::Error::InvalidQueueName);
+            }
+            Some(s[1..topic_index - 3].to_string())
+        } else {
+            None
+        };
+
+        Ok(Queue {
+            slot,
+            topic: topic.to_owned(),
+            priority: priority
+                .parse::<i8>()
+                .map_err(|_| crate::errors::Error::InvalidQueueName)?,
+        })
     }
 }
 
@@ -145,7 +212,10 @@ impl FromRedisValue for Task {
                 .map_err(FromRedisValueError::DecodeTaskStateError)?;
 
             if let Some(stream_id) = map.get("stream_id") {
-                task.runtime.stream_id = from_redis_value(stream_id)?
+                let stream_id: String = from_redis_value(stream_id)?;
+                if !stream_id.is_empty() {
+                    task.runtime.stream_id = Some(stream_id)
+                }
             }
             if let Some(retried) = map.get("retried") {
                 task.runtime.retried = from_redis_value(retried)?;
@@ -235,6 +305,9 @@ pub enum FromRedisValueError {
 
     #[error("task value is not a map")]
     TaskValueIsNotAMap,
+
+    #[error("invalid stats response")]
+    InvalidStatsResponse,
 }
 
 impl From<FromRedisValueError> for RedisError {
@@ -262,6 +335,9 @@ impl From<FromRedisValueError> for RedisError {
             }
             FromRedisValueError::TaskValueIsNotAMap => {
                 RedisError::from((ErrorKind::TypeError, "task value is not a map"))
+            }
+            FromRedisValueError::InvalidStatsResponse => {
+                RedisError::from((ErrorKind::TypeError, "invalid stats response"))
             }
         }
     }
@@ -348,7 +424,7 @@ impl<'a> TryFrom<&'a Task> for RedisTaskArgs<'a> {
                         tasks
                             .iter()
                             .map(|task| {
-                                let qname = QName::from_completed_task(task);
+                                let qname = QName::from(task);
                                 (
                                     RedisKey::task(&qname, &task.id).to_string(),
                                     task.state.to_string(),
@@ -497,5 +573,57 @@ impl<'a> RedisTaskArgs<'a> {
             .write_redis_args(out);
         // -- `ARGV[8]` -> optional - error msg
         self.task.runtime.last_err.write_redis_args(out);
+    }
+}
+
+impl FromRedisValue for Stats {
+    fn from_redis_value(v: &Value) -> RedisResult<Self> {
+        if let Some(ret) = v.as_sequence()
+            && ret.len() == 5
+        {
+            return Ok(Stats {
+                pending_count: from_redis_value(&ret[0])?,
+                active_count: from_redis_value(&ret[1])?,
+                scheduled_count: from_redis_value(&ret[2])?,
+                dependent_count: from_redis_value(&ret[3])?,
+                completed_count: from_redis_value(&ret[4])?,
+            });
+        }
+        Err(FromRedisValueError::InvalidStatsResponse.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{model::Queue, rdb::constant::QName};
+
+    const MAYBE_INPUT: [&str; 14] = [
+        "", "x", "xxx", "{xxx", "xxx}", "{}", "{{}}", "{{}}", "{{{}}}", ":", "::", ":::", ":{}:",
+        "{}:{}",
+    ];
+
+    #[test]
+    fn test_queue_try_from_str() {
+        let mut maybe_slot = MAYBE_INPUT
+            .iter()
+            .map(|s| Some(s.to_string()))
+            .collect::<Vec<_>>();
+        maybe_slot.push(None);
+
+        for topic in MAYBE_INPUT {
+            for slot in maybe_slot.clone() {
+                let queue = Queue {
+                    slot,
+                    topic: topic.to_string(),
+                    priority: 0,
+                };
+
+                let qname = QName::from(&queue);
+
+                let queue_from_str = Queue::try_from_redis(&qname.to_string(), topic).unwrap();
+
+                assert_eq!(queue, queue_from_str);
+            }
+        }
     }
 }

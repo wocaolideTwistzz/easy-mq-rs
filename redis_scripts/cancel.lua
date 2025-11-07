@@ -2,6 +2,7 @@
 -- `KEYS[2]` -> easy-mq:`qname`:stream
 -- `KEYS[3]` -> easy-mq:`qname`:archive
 -- `KEYS[4]` -> easy-mq:`qname`:deadline
+-- `KEYS[5]` -> easy-mq:`qname`:archive_stream
 
 -- `ARGV[1]` -> stream id
 -- `ARGV[2]` -> current timestamp (in milliseconds)
@@ -11,9 +12,10 @@ local task_key = KEYS[1]
 local stream_key = KEYS[2]
 local archive_key = KEYS[3]
 local deadline_key = KEYS[4]
+local archive_stream_key = KEYS[5]
 
 local stream_id = ARGV[1]
-local current = tonumber(ARGV[2])
+local current = tonumber(ARGV[2]) or 0
 local err_msg = ARGV[3]
 
 -- 1. 将当前消息队列中的当前任务标记为已完成
@@ -50,6 +52,7 @@ local archive_expired_at = current + retention
 -- 4. 更新任务存档过期时间
 -- 4. Update task archive expiration time.
 redis.call('ZADD', archive_key, archive_expired_at, task_key)
+redis.call('ZADD', archive_stream_key, archive_expired_at, stream_id)
 
 -- 5. 删除`deadline`
 -- 5. Remove `deadline`

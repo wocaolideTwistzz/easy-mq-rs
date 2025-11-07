@@ -73,6 +73,7 @@ pub static DEPEND: LazyLock<Script> = LazyLock::new(|| {
 /// -- `KEYS[2]` -> easy-mq:`qname`:stream
 /// -- `KEYS[3]` -> easy-mq:`qname`:archive
 /// -- `KEYS[4]` -> easy-mq:`qname`:deadline
+/// -- `KEYS[5]` -> easy-mq:`qname`:archive_stream
 ///
 /// -- `ARGV[1]` -> stream id
 /// -- `ARGV[2]` -> current timestamp (in milliseconds)
@@ -89,6 +90,7 @@ pub static SUCCEED: LazyLock<Script> = LazyLock::new(|| {
 /// -- `KEYS[3]` -> easy-mq:`qname`:scheduled
 /// -- `KEYS[4]` -> easy-mq:`qname`:archive
 /// -- `KEYS[5]` -> easy-mq:`qname`:deadline
+/// -- `KEYS[6]` -> easy-mq:`qname`:archive_stream
 ///
 /// -- `ARGV[1]` -> stream id
 /// -- `ARGV[2]` -> current timestamp (in milliseconds)
@@ -103,6 +105,8 @@ pub static FAIL: LazyLock<Script> = LazyLock::new(|| {
 /// -- `KEYS[1]` -> easy-mq:`qname`:task:{`task_id`}
 /// -- `KEYS[2]` -> easy-mq:`qname`:stream
 /// -- `KEYS[3]` -> easy-mq:`qname`:archive
+/// -- `KEYS[4]` -> easy-mq:`qname`:deadline
+/// -- `KEYS[5]` -> easy-mq:`qname`:archive_stream
 ///
 /// -- `ARGV[1]` -> stream id
 /// -- `ARGV[2]` -> current timestamp (in milliseconds)
@@ -128,6 +132,7 @@ pub static CLAIM_SCHEDULED: LazyLock<Script> = LazyLock::new(|| {
 /// -- `KEYS[1]` -> easy-mq:`qname`:dependent
 /// -- `KEYS[2]` -> easy-mq:`qname`:stream
 /// -- `KEYS[3]` -> easy-mq:`qname`:archive
+/// -- `KEYS[4]` -> easy-mq:`qname`:deadline
 ///
 /// -- `ARGV[1]` -> current
 /// -- `ARGV[2]` -> qname
@@ -135,5 +140,85 @@ pub static CLAIM_DEPENDENT: LazyLock<Script> = LazyLock::new(|| {
     Script::new(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/redis_scripts/claim_dependent.lua"
+    )))
+});
+
+/// -- `KEYS[1]` -> easy-mq:`qname`:deadline
+/// -- `KEYS[2]` -> easy-mq:`qname`:stream
+/// -- `KEYS[3]` -> easy-mq:`qname`:scheduled
+/// -- `KEYS[4]` -> easy-mq:`qname`:dependent
+/// -- `KEYS[5]` -> easy-mq:`qname`:archive
+/// -- `KEYS[6]` -> easy-mq:`qname`:archive_stream
+///
+/// -- `ARGV[1]` -> current
+/// -- `ARGV[2]` -> qname
+pub static CLAIM_DEADLINE: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/redis_scripts/claim_deadline.lua"
+    )))
+});
+
+/// -- `KEYS[1]` -> easy-mq:`qname`:stream
+/// -- `KEYS[2]` -> easy-mq:`qname`:scheduled
+/// -- `KEYS[3]` -> easy-mq:`qname`:archive
+/// -- `KEYS[4]` -> easy-mq:`qname`:archive_stream
+///
+/// -- `ARGV[1]` -> current
+/// -- `ARGV[2]` -> min idle time
+pub static CLAIM_TIMEOUT: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/redis_scripts/claim_timeout.lua"
+    )))
+});
+
+/// -- `KEYS[1]` -> easy-mq:`qname`:archive
+/// -- `KEYS[2]` -> easy-mq:`qname`:archive_stream
+/// -- `KEYS[3]` -> easy-mq:`qname`:stream
+///
+/// -- `ARGV[1]` -> current
+pub static CLAIM_RETENTION: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/redis_scripts/claim_retention.lua"
+    )))
+});
+
+/// -- `KEYS[1]` -> easy-mq:`qname`:stream
+/// -- `KEYS[2]` -> easy-mq:`qname`:archive
+/// -- `KEYS[3]` -> easy-mq:`qname`:archive_stream
+///
+/// -- `ARGV[1]` -> min pending time (in milliseconds)
+pub static CANCEL_PENDING: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/redis_scripts/cancel_pending.lua"
+    )))
+});
+
+/// -- `KEYS[1]` -> easy-mq:`qname`:stream
+/// -- `KEYS[2]` -> easy-mq:`qname`:scheduled
+/// -- `KEYS[3]` -> easy-mq:`qname`:dependent
+/// -- `KEYS[4]` -> easy-mq:`qname`:archive
+pub static QUEUE_STATS: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/redis_scripts/queue_stats.lua"
+    )))
+});
+
+/// -- `KEYS[1]` -> easy-mq:`qname`:stream
+/// -- `KEYS[2]` -> easy-mq:`qname`:scheduled
+/// -- `KEYS[3]` -> easy-mq:`qname`:dependent
+/// -- `KEYS[4]` -> easy-mq:`qname`:archive
+/// -- `KEYS[5]` -> easy-mq:`qname`:archive_stream
+/// -- `KEYS[6]` -> easy-mq:`qname`:deadline
+///
+/// -- `ARGV[1]` -> qname
+pub static DELETE_QUEUE: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/redis_scripts/delete_queue.lua"
     )))
 });

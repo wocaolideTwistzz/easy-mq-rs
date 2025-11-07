@@ -1,15 +1,19 @@
 pub mod constant;
 pub mod scripts;
 
-use deadpool_redis::redis::{self, aio::ConnectionLike};
+use std::collections::HashMap;
+
+use deadpool_redis::redis::{self, Cmd, aio::ConnectionLike};
 
 use crate::{
     errors::{Error, Result},
+    model::{Queue, QueueInfo, Stats, TopicInfo, TopicQueuesInfo},
     rdb::{
         constant::{DEFAULT_WORKER, QName, RedisKey, RedisTaskArgs},
         scripts::{
-            CANCEL, CLAIM_DEPENDENT, CLAIM_SCHEDULED, DEPEND, DEQUEUE, ENQUEUE, FAIL, SCHEDULE,
-            SUCCEED,
+            CANCEL, CANCEL_PENDING, CLAIM_DEADLINE, CLAIM_DEPENDENT, CLAIM_RETENTION,
+            CLAIM_SCHEDULED, CLAIM_TIMEOUT, DELETE_QUEUE, DEPEND, DEQUEUE, ENQUEUE, FAIL,
+            QUEUE_STATS, SCHEDULE, SUCCEED,
         },
     },
     task::{Task, TaskState},
@@ -24,7 +28,7 @@ use crate::{
 pub async fn enqueue(conn: &mut impl ConnectionLike, task: &Task) -> Result<String> {
     debug_assert_eq!(task.runtime.state, TaskState::Pending);
 
-    let qname = QName::from_task(task);
+    let qname = QName::from(task);
     let task_key = RedisKey::task(&qname, &task.id).to_string();
     let stream_key = RedisKey::stream(&qname).to_string();
     let deadline_key = RedisKey::deadline(&qname).to_string();
@@ -76,7 +80,7 @@ pub async fn enqueue(conn: &mut impl ConnectionLike, task: &Task) -> Result<Stri
 pub async fn schedule(conn: &mut impl ConnectionLike, task: &Task) -> Result<()> {
     debug_assert_eq!(task.runtime.state, TaskState::Scheduled);
 
-    let qname = QName::from_task(task);
+    let qname = QName::from(task);
     let task_key = RedisKey::task(&qname, &task.id).to_string();
     let scheduled_key = RedisKey::scheduled(&qname).to_string();
     let deadline_key = RedisKey::deadline(&qname).to_string();
@@ -128,7 +132,7 @@ pub async fn schedule(conn: &mut impl ConnectionLike, task: &Task) -> Result<()>
 pub async fn depend(conn: &mut impl ConnectionLike, task: &Task) -> Result<()> {
     debug_assert_eq!(task.runtime.state, TaskState::Dependent);
 
-    let qname = QName::from_task(task);
+    let qname = QName::from(task);
     let task_key = RedisKey::task(&qname, &task.id).to_string();
     let dependent_key = RedisKey::dependent(&qname).to_string();
     let dependent_task_key = RedisKey::dependent_task(&qname, &task.id).to_string();
@@ -180,15 +184,16 @@ pub async fn depend(conn: &mut impl ConnectionLike, task: &Task) -> Result<()> {
 /// Take the first consumable task from the specified message queue list in order.
 pub async fn dequeue(
     conn: &mut impl ConnectionLike,
-    queues: &[QName],
+    queues: &[Queue],
     worker: Option<&str>,
 ) -> Result<Option<Task>> {
     let worker = worker.unwrap_or(DEFAULT_WORKER);
     let current = chrono::Local::now().timestamp_millis();
+    let qnames = queues.iter().map(QName::from).collect::<Vec<_>>();
 
     let task = DEQUEUE
         .key(
-            queues
+            qnames
                 .iter()
                 .map(|qname| RedisKey::stream(qname).to_string())
                 .collect::<Vec<_>>(),
@@ -208,15 +213,17 @@ pub async fn dequeue(
 /// Set the task state to succeed and save it.
 pub async fn succeed(
     conn: &mut impl ConnectionLike,
-    qname: &QName,
+    queue: impl Into<QName>,
     task_id: &str,
     stream_id: &str,
-    result: Option<Vec<u8>>,
+    result: Option<&[u8]>,
 ) -> Result<()> {
-    let task_key = RedisKey::task(qname, task_id).to_string();
-    let stream_key = RedisKey::stream(qname).to_string();
-    let archive_key = RedisKey::archive(qname).to_string();
-    let deadline_key = RedisKey::deadline(qname).to_string();
+    let qname = queue.into();
+    let task_key = RedisKey::task(&qname, task_id).to_string();
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let archive_key = RedisKey::archive(&qname).to_string();
+    let deadline_key = RedisKey::deadline(&qname).to_string();
+    let archive_stream_key = RedisKey::archive_stream(&qname).to_string();
 
     let current = chrono::Local::now().timestamp_millis();
 
@@ -225,6 +232,7 @@ pub async fn succeed(
         .key(stream_key)
         .key(archive_key)
         .key(deadline_key)
+        .key(archive_stream_key)
         .arg(stream_id)
         .arg(current)
         .arg(result)
@@ -240,15 +248,17 @@ pub async fn succeed(
 /// Set the task state to canceled. It will not be retried; the task will be saved immediately.
 pub async fn cancel(
     conn: &mut impl ConnectionLike,
-    qname: &QName,
+    queue: impl Into<QName>,
     task_id: &str,
     stream_id: &str,
-    err_msg: Option<String>,
+    err_msg: Option<&str>,
 ) -> Result<()> {
-    let task_key = RedisKey::task(qname, task_id).to_string();
-    let stream_key = RedisKey::stream(qname).to_string();
-    let archive_key = RedisKey::archive(qname).to_string();
-    let deadline_key = RedisKey::deadline(qname).to_string();
+    let qname = queue.into();
+    let task_key = RedisKey::task(&qname, task_id).to_string();
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let archive_key = RedisKey::archive(&qname).to_string();
+    let deadline_key = RedisKey::deadline(&qname).to_string();
+    let archive_stream_key = RedisKey::archive_stream(&qname).to_string();
 
     let current = chrono::Local::now().timestamp_millis();
 
@@ -257,6 +267,7 @@ pub async fn cancel(
         .key(stream_key)
         .key(archive_key)
         .key(deadline_key)
+        .key(archive_stream_key)
         .arg(stream_id)
         .arg(current)
         .arg(err_msg)
@@ -275,16 +286,18 @@ pub async fn cancel(
 /// If the task has a retry rule set and no retry interval is specified, a new stream_id will be generated.
 pub async fn fail(
     conn: &mut impl ConnectionLike,
-    qname: &QName,
+    queue: impl Into<QName>,
     task_id: &str,
     stream_id: &str,
     err_msg: &str,
 ) -> Result<Option<String>> {
-    let task_key = RedisKey::task(qname, task_id).to_string();
-    let stream_key = RedisKey::stream(qname).to_string();
-    let scheduled_key = RedisKey::scheduled(qname).to_string();
-    let archive_key = RedisKey::archive(qname).to_string();
-    let deadline_key = RedisKey::deadline(qname).to_string();
+    let qname = queue.into();
+    let task_key = RedisKey::task(&qname, task_id).to_string();
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let scheduled_key = RedisKey::scheduled(&qname).to_string();
+    let archive_key = RedisKey::archive(&qname).to_string();
+    let deadline_key = RedisKey::deadline(&qname).to_string();
+    let archive_stream_key = RedisKey::archive_stream(&qname).to_string();
 
     let current = chrono::Local::now().timestamp_millis();
 
@@ -294,6 +307,7 @@ pub async fn fail(
         .key(scheduled_key)
         .key(archive_key)
         .key(deadline_key)
+        .key(archive_stream_key)
         .arg(stream_id)
         .arg(current)
         .arg(err_msg)
@@ -302,9 +316,22 @@ pub async fn fail(
     Ok(ret)
 }
 
-pub async fn claim_scheduled(conn: &mut impl ConnectionLike, qname: &QName) -> Result<usize> {
-    let scheduled_key = RedisKey::scheduled(qname).to_string();
-    let stream_key = RedisKey::stream(qname).to_string();
+/// easy-mq:`qname`:scheduled -> easy-mq:`qname`:stream
+///
+/// 认领到期的定时任务,放入`stream`消息队列.
+/// 任务状态 `scheduled` -> `pending`
+/// 返回认领的个数,单次最多一百个.
+///
+/// Claim the due date of the scheduled task and add it to the `stream` message queue.
+/// Task state `scheduled` -> `pending`.
+/// Returns the number of items claimed, with a maximum of one hundred per claim.
+pub async fn claim_scheduled(
+    conn: &mut impl ConnectionLike,
+    queue: impl Into<QName>,
+) -> Result<usize> {
+    let qname = queue.into();
+    let scheduled_key = RedisKey::scheduled(&qname).to_string();
+    let stream_key = RedisKey::stream(&qname).to_string();
 
     let current = chrono::Local::now().timestamp_millis();
 
@@ -318,14 +345,26 @@ pub async fn claim_scheduled(conn: &mut impl ConnectionLike, qname: &QName) -> R
     Ok(count)
 }
 
+/// easy-mq:`qname`:dependent -> easy-mq:`qname`:stream | easy-mq:`qname`:archive
+///
+/// 认领依赖满足的任务,投递至`stream`消息队列, 认领依赖永远无法满足的任务(如依赖条件设置为某个任务的执行成功,但是该任务执行失败了),投递至`archive`
+/// 任务状态 `dependent` -> `pending` | `canceled`
+/// 返回满足依赖条件的个数(-> `pending`)和被取消的任务(-> `canceled`)
+///
+/// Claim tasks whose dependencies are satisfied and submit them to the `stream` message queue.
+/// Claim tasks whose dependencies can never be satisfied (e.g., dependency condition is set to ensure the success of the task,
+/// but the task itself fails) and submit them to `archive` message queue.
+/// Task state `dependent` -> `pending` | `canceled`
+/// Returns the number of task that meet the dependency conditions (-> `pending`) and the number of tasks that were canceled (-> `canceled`)
 pub async fn claim_dependent(
     conn: &mut impl ConnectionLike,
-    qname: &QName,
+    queue: impl Into<QName>,
 ) -> Result<(usize, usize)> {
-    let dependent_key = RedisKey::dependent(qname).to_string();
-    let stream_key = RedisKey::stream(qname).to_string();
-    let archive_key = RedisKey::archive(qname).to_string();
-    let deadline_key = RedisKey::deadline(qname).to_string();
+    let qname = queue.into();
+    let dependent_key = RedisKey::dependent(&qname).to_string();
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let archive_key = RedisKey::archive(&qname).to_string();
+    let deadline_key = RedisKey::deadline(&qname).to_string();
 
     let current = chrono::Local::now().timestamp_millis();
 
@@ -342,18 +381,308 @@ pub async fn claim_dependent(
     Ok((pending_count, canceled_count))
 }
 
+/// easy-mq:`qname`:stream | easy-mq:`qname`:scheduled | easy-mq:`qname`:dependent -> easy-mq:`qname`:archive
+///
+/// 认领截止时间到达的任务,不管当前满足条件的任务是还在等待消费(`scheduled`/`dependent`),还是消费中(`active`),都把他们状态设置为取消并存档(`canceled`)
+/// 任务状态 `scheduled` | `active` | `dependent` -> `canceled`
+/// 返回取消的个数
+///
+/// Claim tasks whose deadline has arrived, regardless of whether the currently eligible tasks are still waiting to be consumed (`scheduled`/`dependent`)
+/// or being consumed(`active`), set their state to `canceled` and archive them.
+/// Task state `scheduled` | `active` | `dependent` -> `canceled`
+/// Returns the number of cancellations.
+pub async fn claim_deadline(
+    conn: &mut impl ConnectionLike,
+    queue: impl Into<QName>,
+) -> Result<usize> {
+    let qname = queue.into();
+    let deadline_key = RedisKey::deadline(&qname).to_string();
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let scheduled_key = RedisKey::scheduled(&qname).to_string();
+    let dependent_key = RedisKey::dependent(&qname).to_string();
+    let archive_key = RedisKey::archive(&qname).to_string();
+    let archive_stream_key = RedisKey::archive_stream(&qname).to_string();
+
+    let current = chrono::Local::now().timestamp_millis();
+
+    let ret = CLAIM_DEADLINE
+        .key(deadline_key)
+        .key(stream_key)
+        .key(scheduled_key)
+        .key(dependent_key)
+        .key(archive_key)
+        .key(archive_stream_key)
+        .arg(current)
+        .arg(qname.to_string())
+        .invoke_async(conn)
+        .await?;
+    Ok(ret)
+}
+
+/// easy-mq:`qname`:stream -> easy-mq:`qname`:stream | easy-mq:`qname`:scheduled | easy-mq:`qname`:archive
+///
+/// 认领执行超时的任务, 直接标记为完成, 并且:
+/// 若任务还有重试次数, 存在重试间隔时间 -> 进入`scheduled` 等待分配
+/// 任务还有重试次数, 但没有重试间隔时间 -> 直接重新进入当前队列
+/// 任务无需重试 -> 直接存档
+/// 任务状态 `active` -> `retry` | `pending` | `canceled`
+/// 返回重试任务数和被取消任务数
+///
+/// Claim execution-timeout tasks, mark it as completed, and:
+/// If the task has remaining retries and retry interval exists -> enters `scheduled` waiting for assignment.
+/// If the task has remaining retries but no retry interval -> re-enter current queue immediately.
+/// If the task does not require retries -> save it immediately.
+/// Task state `active` -> `retry` | `pending` | `canceled`
+/// Returns the number of retried tasks and the number of canceled tasks.
+pub async fn claim_timeout(
+    conn: &mut impl ConnectionLike,
+    queue: impl Into<QName>,
+    min_idle_ms: u64,
+) -> Result<(usize, usize)> {
+    let qname = queue.into();
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let scheduled_key = RedisKey::scheduled(&qname).to_string();
+    let archive_key = RedisKey::archive(&qname).to_string();
+    let archive_stream_key = RedisKey::archive_stream(&qname).to_string();
+
+    let current = chrono::Local::now().timestamp_millis();
+
+    let ret = CLAIM_TIMEOUT
+        .key(stream_key)
+        .key(scheduled_key)
+        .key(archive_key)
+        .key(archive_stream_key)
+        .arg(current)
+        .arg(min_idle_ms)
+        .invoke_async(conn)
+        .await?;
+    Ok(ret)
+}
+
+/// easy-mq:`qname`:archive
+///
+/// 认领并删除存档超时的任务
+/// 返回存档超时任务数
+///
+/// Claim archive-timeout tasks, delete them.
+/// Returns the number of archive-timeout
+pub async fn claim_retention(
+    conn: &mut impl ConnectionLike,
+    queue: impl Into<QName>,
+) -> Result<usize> {
+    let qname = queue.into();
+    let archive_key = RedisKey::archive(&qname).to_string();
+    let archive_stream_key = RedisKey::archive_stream(&qname).to_string();
+    let stream_key = RedisKey::stream(&qname).to_string();
+
+    let current = chrono::Local::now().timestamp_millis();
+
+    let ret = CLAIM_RETENTION
+        .key(archive_key)
+        .key(archive_stream_key)
+        .key(stream_key)
+        .arg(current)
+        .invoke_async(conn)
+        .await?;
+    Ok(ret)
+}
+
+/// easy-mq:`qname`:stream -> easy-mq:`qname`:archive
+///
+/// 取消`pending`超过指定时间的任务
+///
+/// Cancel tasks that have been pending for more than a specified time.
+///
+/// Task state `pending` -> `canceled`
+///
+/// 返回取消的任务数
+/// Returns the number of canceled task count
+pub async fn cancel_pending(
+    conn: &mut impl ConnectionLike,
+    queue: impl Into<QName>,
+    min_pending_ms: u64,
+) -> Result<usize> {
+    let qname = queue.into();
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let archive_key = RedisKey::archive(&qname).to_string();
+    let archive_stream_key = RedisKey::archive_stream(&qname).to_string();
+
+    let ret = CANCEL_PENDING
+        .key(stream_key)
+        .key(archive_key)
+        .key(archive_stream_key)
+        .arg(min_pending_ms)
+        .invoke_async(conn)
+        .await?;
+    Ok(ret)
+}
+
+/// 获取队列的当前统计信息
+/// Get the current stats of the queue
+pub async fn queue_stats(conn: &mut impl ConnectionLike, queue: impl Into<QName>) -> Result<Stats> {
+    let qname = queue.into();
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let scheduled_key = RedisKey::scheduled(&qname).to_string();
+    let dependent_key = RedisKey::dependent(&qname).to_string();
+    let archive_key = RedisKey::archive(&qname).to_string();
+
+    let ret = QUEUE_STATS
+        .key(stream_key)
+        .key(scheduled_key)
+        .key(dependent_key)
+        .key(archive_key)
+        .invoke_async(conn)
+        .await?;
+
+    Ok(ret)
+}
+
+/// 获取话题的当前统计信息
+/// Get the current stats of the topic
+pub async fn topic_stats(conn: &mut impl ConnectionLike, topic: &str) -> Result<Stats> {
+    let queue_list = queues(conn, topic).await?;
+
+    let mut result = Stats::default();
+    for queue in queue_list {
+        let stat = queue_stats(conn, &queue).await?;
+        result.pending_count += stat.pending_count;
+        result.active_count += stat.active_count;
+        result.scheduled_count += stat.scheduled_count;
+        result.dependent_count += stat.dependent_count;
+        result.completed_count += stat.completed_count;
+    }
+
+    Ok(result)
+}
+
+/// easy-mq:`qname`:task:{`task_id`}  
+///
+/// 查看任务, 但不做任何修改
+///
+/// Peek task without any changes.
+pub async fn peek_task(
+    conn: &mut impl ConnectionLike,
+    queue: impl Into<QName>,
+    task_id: &str,
+) -> Result<Task> {
+    let qname = queue.into();
+    let task_key = RedisKey::task(&qname, task_id).to_string();
+
+    let task = Cmd::hgetall(task_key).query_async(conn).await?;
+
+    Ok(task)
+}
+
+/// 获取所有话题
+/// Get all topics
+pub async fn topics(conn: &mut impl ConnectionLike) -> Result<Vec<TopicInfo>> {
+    let topics_key = RedisKey::topics().to_string();
+
+    let ret = Cmd::zrange_withscores(topics_key, 0, -1)
+        .query_async::<Vec<(String, u64)>>(conn)
+        .await?;
+    Ok(ret
+        .into_iter()
+        .map(|(topic, last_insert_at_ms)| TopicInfo {
+            topic,
+            last_insert_at_ms,
+        })
+        .collect())
+}
+
+/// 获取话题下的所有队列
+/// Get all queues of a topic
+pub async fn queues(conn: &mut impl ConnectionLike, topic: &str) -> Result<Vec<QueueInfo>> {
+    let queues_key = RedisKey::qname(topic).to_string();
+
+    let ret = Cmd::hgetall(queues_key)
+        .query_async::<HashMap<String, u64>>(conn)
+        .await?;
+
+    ret.into_iter()
+        .map(|(queue, last_insert_at_ms)| {
+            Ok(QueueInfo::from_queue(
+                Queue::try_from_redis(&queue, topic)?,
+                last_insert_at_ms,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()
+}
+
+/// 获取所有队列
+/// Get all queues
+pub async fn all_queues(conn: &mut impl ConnectionLike) -> Result<Vec<TopicQueuesInfo>> {
+    let topics = topics(conn).await?;
+    let mut queue_list = Vec::new();
+    for topic in topics {
+        let queues = queues(conn, &topic.topic).await?;
+        queue_list.push(TopicQueuesInfo { topic, queues });
+    }
+    Ok(queue_list)
+}
+
+/// 删除话题以及话题下的所有队列,任务
+/// Delete topic and all queues and tasks under it
+pub async fn delete_topic(conn: &mut impl ConnectionLike, topic: &str) -> Result<()> {
+    let queues = queues(conn, topic).await?;
+    for queue in queues {
+        delete_queue(conn, queue.as_ref()).await?;
+    }
+    let topic_key = RedisKey::topics().to_string();
+
+    Cmd::zrem(topic_key, topic).exec_async(conn).await?;
+    Ok(())
+}
+
+/// 删除队列以及队列下的所有任务
+/// Delete queue and all tasks under it
+pub async fn delete_queue(conn: &mut impl ConnectionLike, queue: &Queue) -> Result<()> {
+    let qname = queue.into();
+
+    let stream_key = RedisKey::stream(&qname).to_string();
+    let scheduled_key = RedisKey::scheduled(&qname).to_string();
+    let dependent_key = RedisKey::dependent(&qname).to_string();
+    let archive_key = RedisKey::archive(&qname).to_string();
+    let archive_stream_key = RedisKey::archive_stream(&qname).to_string();
+    let deadline_key = RedisKey::deadline(&qname).to_string();
+
+    let _: i32 = DELETE_QUEUE
+        .key(stream_key)
+        .key(scheduled_key)
+        .key(dependent_key)
+        .key(archive_key)
+        .key(archive_stream_key)
+        .key(deadline_key)
+        .arg(&qname.0)
+        .invoke_async(conn)
+        .await?;
+
+    let qname_key = RedisKey::qname(&queue.topic).to_string();
+    Cmd::hdel(qname_key, &qname.0).exec_async(conn).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
-    use deadpool_redis::{Config, Connection};
+    use std::time::Duration;
 
-    use crate::{
-        rdb::{
-            cancel, claim_dependent, claim_scheduled, constant::QName, depend, dequeue, enqueue,
-            fail, schedule, succeed,
-        },
-        task::{ScheduledAt, Task, TaskCompletedState},
+    use deadpool_redis::{
+        Config, Connection,
+        redis::{Cmd, aio::ConnectionLike},
     };
 
+    use crate::{
+        model::{Queue, Stats},
+        rdb::{
+            all_queues, cancel, cancel_pending, claim_deadline, claim_dependent, claim_retention,
+            claim_scheduled, claim_timeout, constant::QName, delete_queue, delete_topic, depend,
+            dequeue, enqueue, fail, peek_task, queue_stats, queues, schedule, succeed, topic_stats,
+            topics,
+        },
+        task::{ScheduledAt, Task, TaskCompletedState, TaskOptions, TaskState},
+    };
+
+    /// !!! this command will flush redis db
     async fn new_redis_conn() -> Connection {
         let pool = Config::from_url("redis://127.0.0.1:6379")
             .builder()
@@ -361,31 +690,147 @@ mod test {
             .build()
             .unwrap();
 
-        pool.get().await.unwrap()
+        let mut conn = pool.get().await.unwrap();
+        Cmd::flushall().exec_async(&mut conn).await.unwrap();
+        conn
+    }
+
+    impl PartialEq for Task {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id
+                && self.topic == other.topic
+                && self.payload == other.payload
+                && self.runtime.state == other.runtime.state
+                && self.runtime.stream_id == other.runtime.stream_id
+        }
+    }
+
+    async fn simple_dequeue(
+        conn: &mut impl ConnectionLike,
+        queue: &Queue,
+        options: Option<TaskOptions>,
+    ) -> Task {
+        let task = queue.generate_task_with_options(None, options.unwrap_or_default());
+
+        enqueue(conn, &task).await.unwrap();
+
+        let dequeued = dequeue(conn, &[Queue::from(&task)], None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(TaskState::Active, dequeued.runtime.state);
+
+        dequeued
+    }
+
+    async fn hysteria_enqueue(conn: &mut impl ConnectionLike, queue: &Queue) -> Stats {
+        let active_count = rand::random_range(0..10);
+        for _ in 0..active_count {
+            simple_dequeue(conn, queue, None).await;
+        }
+
+        let completed_count = rand::random_range(0..10);
+        for _ in 0..completed_count {
+            let task = simple_dequeue(conn, queue, None).await;
+            succeed(
+                conn,
+                queue,
+                &task.id,
+                task.runtime.stream_id.unwrap().as_ref(),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        let pending_count = rand::random_range(0..10);
+        for _ in 0..pending_count {
+            enqueue(conn, &queue.generate_task(None)).await.unwrap();
+        }
+
+        let scheduled_count = rand::random_range(0..10);
+        for _ in 0..scheduled_count {
+            schedule(
+                conn,
+                &queue
+                    .generate_task(None)
+                    .with_scheduled(ScheduledAt::TimestampMs(1)),
+            )
+            .await
+            .unwrap();
+        }
+
+        let dependent_count = rand::random_range(0..10);
+        for _ in 0..dependent_count {
+            depend(
+                conn,
+                &queue
+                    .generate_task(None)
+                    .with_scheduled(ScheduledAt::DependsOn(vec![
+                        Task::new("topic", None).to_completed_task(TaskCompletedState::Any),
+                    ])),
+            )
+            .await
+            .unwrap();
+        }
+
+        Stats {
+            pending_count,
+            active_count,
+            scheduled_count,
+            dependent_count,
+            completed_count,
+        }
+    }
+
+    async fn assert_task(
+        conn: &mut impl ConnectionLike,
+        task: &Task,
+        state: TaskState,
+        err_msg: Option<&str>,
+    ) -> Task {
+        let peeked = peek_task(conn, task, &task.id).await.unwrap();
+
+        assert_eq!(peeked.id, task.id);
+        assert_eq!(peeked.topic, task.topic);
+        assert_eq!(peeked.runtime.state, state);
+        assert_eq!(peeked.runtime.last_err.as_deref(), err_msg);
+        peeked
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_enqueue() {
-        let task = Task::new("test_topic", None);
+        let mut task = Task::new("test_topic", None);
 
         let mut conn = new_redis_conn().await;
 
         let stream_id = enqueue(&mut conn, &task).await.unwrap();
 
-        println!("{} - {}", task.id, stream_id)
+        task.runtime.stream_id = Some(stream_id);
+
+        // Verify task exists
+        let peeked: Task = peek_task(&mut conn, &task, &task.id).await.unwrap();
+
+        assert_eq!(task, peeked);
     }
 
     #[tokio::test]
-    async fn test_dequeue() {
+    #[serial_test::serial]
+    async fn test_enqueue_duplicate() {
+        let task = Task::new("test_topic", None);
+
         let mut conn = new_redis_conn().await;
 
-        let qname = QName::new("test_topic", 0);
-        let task = dequeue(&mut conn, &[qname], None).await.unwrap();
+        let _ = enqueue(&mut conn, &task).await.unwrap();
 
-        println!("{:?}", task)
+        let err = enqueue(&mut conn, &task).await.err().unwrap();
+
+        assert!(err.to_string().contains("already exists"))
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_schedule() {
         let mut conn = new_redis_conn().await;
 
@@ -394,142 +839,747 @@ mod test {
             Task::new("test_topic", None).with_scheduled(ScheduledAt::TimestampMs(scheduled_at));
 
         schedule(&mut conn, &task).await.unwrap();
+
+        // Verify task exists
+        let peeked: Task = peek_task(&mut conn, &task, &task.id).await.unwrap();
+
+        assert_eq!(task, peeked);
     }
 
     #[tokio::test]
-    async fn test_succeed() {
-        let mut conn = new_redis_conn().await;
-
-        let queues = vec![QName::new("test_topic", 0)];
-        loop {
-            match dequeue(&mut conn, &queues, None).await.unwrap() {
-                Some(task) => {
-                    println!(
-                        "Succeed -> {} - {}",
-                        task.id,
-                        task.runtime.stream_id.as_ref().unwrap()
-                    );
-                    succeed(
-                        &mut conn,
-                        &queues[0],
-                        &task.id,
-                        task.runtime.stream_id.as_ref().unwrap(),
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                }
-                None => return,
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_fail() {
-        let mut conn = new_redis_conn().await;
-
-        let queues = vec![QName::new("test_topic", 0)];
-        loop {
-            match dequeue(&mut conn, &queues, None).await.unwrap() {
-                Some(task) => {
-                    println!(
-                        "Fail -> {} - {}",
-                        task.id,
-                        task.runtime.stream_id.as_ref().unwrap()
-                    );
-                    fail(
-                        &mut conn,
-                        &queues[0],
-                        &task.id,
-                        task.runtime.stream_id.as_ref().unwrap(),
-                        "something wrong",
-                    )
-                    .await
-                    .unwrap();
-                }
-                None => return,
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_cancel() {
-        let mut conn = new_redis_conn().await;
-
-        let queues = vec![QName::new("test_topic", 0)];
-        loop {
-            match dequeue(&mut conn, &queues, None).await.unwrap() {
-                Some(task) => {
-                    println!(
-                        "Cancel -> {} - {}",
-                        task.id,
-                        task.runtime.stream_id.as_ref().unwrap()
-                    );
-                    cancel(
-                        &mut conn,
-                        &queues[0],
-                        &task.id,
-                        task.runtime.stream_id.as_ref().unwrap(),
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                }
-                None => return,
-            }
-        }
-    }
-
-    #[tokio::test]
+    #[serial_test::serial]
     async fn test_dependent() {
         let mut conn = new_redis_conn().await;
 
-        let required_tasks = (0..10)
-            .map(|_| Task::new("test_topic", None))
-            .collect::<Vec<_>>();
+        let task = Task::new("test_topic", None).with_scheduled(ScheduledAt::DependsOn(vec![
+            Task::new("test_topic", None).to_completed_task(TaskCompletedState::Any),
+        ]));
 
-        let dep_task = Task::new("test_topic", None).with_scheduled(ScheduledAt::DependsOn(
-            required_tasks
-                .iter()
-                .map(|v| v.to_completed_task(TaskCompletedState::Any))
-                .collect(),
-        ));
-        let dep_task1 = Task::new("test_topic", None).with_scheduled(ScheduledAt::DependsOn(
-            required_tasks
-                .iter()
-                .map(|v| v.to_completed_task(TaskCompletedState::Succeed))
-                .collect(),
-        ));
+        depend(&mut conn, &task).await.unwrap();
 
-        for task in required_tasks {
-            enqueue(&mut conn, &task).await.unwrap();
-        }
+        let peeked = peek_task(&mut conn, &task, &task.id).await.unwrap();
 
-        depend(&mut conn, &dep_task).await.unwrap();
-        depend(&mut conn, &dep_task1).await.unwrap()
+        assert_eq!(task, peeked);
     }
 
     #[tokio::test]
-    async fn test_claim_scheduled() {
+    #[serial_test::serial]
+    async fn test_dequeue() {
         let mut conn = new_redis_conn().await;
 
-        let qname = QName::new("test_topic", 0);
+        let mut task = Task::new("test_topic", None);
 
-        let scheduled_count = claim_scheduled(&mut conn, &qname).await.unwrap();
+        let stream_id = enqueue(&mut conn, &task).await.unwrap();
 
-        println!("scheduled: {scheduled_count}");
+        task.runtime.stream_id = Some(stream_id);
+        task.runtime.state = TaskState::Active;
+
+        let dequeued = dequeue(&mut conn, &[Queue::from(&task)], None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(task, dequeued)
     }
 
     #[tokio::test]
+    #[serial_test::serial]
+    async fn test_succeed() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 1);
+
+        let mut task = simple_dequeue(&mut conn, &queue, None).await;
+
+        succeed(
+            &mut conn,
+            &queue,
+            &task.id,
+            &task.runtime.stream_id.clone().unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        task.runtime.state = TaskState::Succeed;
+
+        let peeked = peek_task(&mut conn, &queue, &task.id).await.unwrap();
+
+        assert_eq!(task, peeked)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_cancel() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 1);
+
+        let mut task = simple_dequeue(&mut conn, &queue, None).await;
+
+        cancel(
+            &mut conn,
+            &queue,
+            &task.id,
+            &task.runtime.stream_id.clone().unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        task.runtime.state = TaskState::Canceled;
+
+        let peeked = peek_task(&mut conn, &queue, &task.id).await.unwrap();
+
+        assert_eq!(task, peeked)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_fail() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 1);
+
+        let mut task = simple_dequeue(&mut conn, &queue, None).await;
+
+        let ret = fail(
+            &mut conn,
+            &queue,
+            &task.id,
+            &task.runtime.stream_id.clone().unwrap(),
+            "something wrong",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ret, None);
+
+        task.runtime.state = TaskState::Failed;
+
+        let peeked = peek_task(&mut conn, &queue, &task.id).await.unwrap();
+
+        assert_eq!(task, peeked);
+        assert_eq!("something wrong", peeked.runtime.last_err.clone().unwrap())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_fail_with_retry() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 1);
+
+        let task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_retry(3, 0);
+
+        enqueue(&mut conn, &task).await.unwrap();
+
+        let mut dequeued = dequeue(&mut conn, std::slice::from_ref(&queue), None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let new_stream_id = fail(
+            &mut conn,
+            &queue,
+            &dequeued.id,
+            &dequeued.runtime.stream_id.clone().unwrap(),
+            "something wrong",
+        )
+        .await
+        .unwrap();
+
+        dequeued.runtime.stream_id = new_stream_id;
+        dequeued.runtime.state = TaskState::Pending;
+
+        let peeked = peek_task(&mut conn, &queue, &task.id).await.unwrap();
+
+        assert_eq!(dequeued, peeked);
+        assert_eq!(peeked.runtime.last_err.as_deref(), Some("something wrong"));
+        assert_eq!(peeked.runtime.retried, 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_fail_with_retry_interval() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 1);
+
+        let task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_retry(3, 1000);
+        enqueue(&mut conn, &task).await.unwrap();
+
+        let mut dequeued = dequeue(&mut conn, std::slice::from_ref(&queue), None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let new_stream_id = fail(
+            &mut conn,
+            &queue,
+            &dequeued.id,
+            &dequeued.runtime.stream_id.clone().unwrap(),
+            "something wrong",
+        )
+        .await
+        .unwrap();
+        dequeued.runtime.stream_id = new_stream_id;
+        dequeued.runtime.state = TaskState::Retry;
+
+        let peeked = peek_task(&mut conn, &queue, &task.id).await.unwrap();
+
+        assert_eq!(dequeued, peeked);
+        assert_eq!(peeked.runtime.last_err.as_deref(), Some("something wrong"));
+        assert_eq!(peeked.runtime.retried, 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_claim_scheduled() {
+        let mut conn = new_redis_conn().await;
+        let queue = Queue::new("test_topic", 0);
+
+        let now = chrono::Local::now().timestamp_millis() as u64;
+        let mut tasks = (0..10)
+            .map(|i| {
+                queue
+                    .generate_task_with_options(None, TaskOptions::default())
+                    .with_scheduled(ScheduledAt::TimestampMs(now + i * 1000))
+            })
+            .collect::<Vec<_>>();
+
+        for task in &tasks {
+            schedule(&mut conn, task).await.unwrap();
+        }
+
+        let random = rand::random_range(0..10) + 1;
+
+        tokio::time::sleep(Duration::from_secs(random)).await;
+
+        let claimed = claim_scheduled(&mut conn, &queue).await.unwrap();
+
+        assert!(claimed >= random as usize - 1);
+
+        for (idx, task) in tasks.iter_mut().enumerate().take(10) {
+            let peek = peek_task(&mut conn, &queue, &task.id).await.unwrap();
+
+            if idx < claimed {
+                assert!(peek.runtime.stream_id.is_some());
+                assert_eq!(peek.runtime.state, TaskState::Pending);
+            } else {
+                assert!(peek.runtime.stream_id.is_none());
+                assert_eq!(peek.runtime.state, TaskState::Scheduled);
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn test_claim_dependent() {
         let mut conn = new_redis_conn().await;
 
-        let (pending_count, canceled_count) =
-            claim_dependent(&mut conn, &QName::new("test_topic", 0))
-                .await
-                .unwrap();
+        let queue = Queue::new("test_topic", 0);
+        let tasks = (0..10)
+            .map(|_| queue.generate_task_with_options(None, TaskOptions::default()))
+            .collect::<Vec<_>>();
+        let dep_task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_scheduled(ScheduledAt::DependsOn(
+                tasks
+                    .iter()
+                    .map(|v| v.to_completed_task(TaskCompletedState::Any))
+                    .collect(),
+            ));
 
-        println!("pending: {pending_count}");
-        println!("canceled: {canceled_count}");
+        depend(&mut conn, &dep_task).await.unwrap();
+        for task in tasks.iter() {
+            enqueue(&mut conn, task).await.unwrap();
+        }
+
+        for _ in 0..10 {
+            let dequeued = dequeue(&mut conn, std::slice::from_ref(&queue), None)
+                .await
+                .unwrap()
+                .unwrap();
+            succeed(
+                &mut conn,
+                &queue,
+                &dequeued.id,
+                &dequeued.runtime.stream_id.clone().unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        let (pending, canceled) = claim_dependent(&mut conn, &queue).await.unwrap();
+
+        assert_eq!(pending, 1);
+        assert_eq!(canceled, 0);
+
+        let peeked = peek_task(&mut conn, &queue, &dep_task.id).await.unwrap();
+
+        assert!(peeked.runtime.stream_id.is_some());
+        assert_eq!(peeked.runtime.state, TaskState::Pending);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_claim_dependent_cancel() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 0);
+        let tasks = (0..10)
+            .map(|_| queue.generate_task_with_options(None, TaskOptions::default()))
+            .collect::<Vec<_>>();
+        let dep_task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_scheduled(ScheduledAt::DependsOn(
+                tasks
+                    .iter()
+                    .map(|v| v.to_completed_task(TaskCompletedState::Succeed))
+                    .collect(),
+            ));
+
+        depend(&mut conn, &dep_task).await.unwrap();
+        for task in tasks.iter() {
+            enqueue(&mut conn, task).await.unwrap();
+        }
+
+        let dequeued = dequeue(&mut conn, std::slice::from_ref(&queue), None)
+            .await
+            .unwrap()
+            .unwrap();
+        cancel(
+            &mut conn,
+            &queue,
+            &dequeued.id,
+            &dequeued.runtime.stream_id.clone().unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (pending, canceled) = claim_dependent(&mut conn, &queue).await.unwrap();
+
+        assert_eq!(pending, 0);
+        assert_eq!(canceled, 1);
+
+        let peeked = peek_task(&mut conn, &queue, &dep_task.id).await.unwrap();
+
+        assert!(peeked.runtime.stream_id.is_none());
+        assert_eq!(peeked.runtime.state, TaskState::Canceled);
+        assert_eq!(
+            peeked.runtime.last_err.as_deref(),
+            Some("dependence can never be satisfied")
+        )
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_claim_deadline() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 0);
+        let deadline = chrono::Local::now().timestamp_millis() as u64 - 1000;
+
+        let active_task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_deadline(deadline);
+        enqueue(&mut conn, &active_task).await.unwrap();
+        dequeue(&mut conn, std::slice::from_ref(&queue), None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let pending_task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_deadline(deadline);
+        enqueue(&mut conn, &pending_task).await.unwrap();
+
+        let scheduled_task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_scheduled(ScheduledAt::TimestampMs(1))
+            .with_deadline(deadline);
+        schedule(&mut conn, &scheduled_task).await.unwrap();
+
+        let dependent_task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_scheduled(ScheduledAt::DependsOn(vec![
+                pending_task.to_completed_task(TaskCompletedState::Any),
+            ]))
+            .with_deadline(deadline);
+        depend(&mut conn, &dependent_task).await.unwrap();
+
+        let claimed = claim_deadline(&mut conn, &queue).await.unwrap();
+        assert_eq!(claimed, 4);
+
+        _ = assert_task(
+            &mut conn,
+            &pending_task,
+            TaskState::Canceled,
+            Some("deadline exceeded"),
+        );
+        _ = assert_task(
+            &mut conn,
+            &active_task,
+            TaskState::Canceled,
+            Some("deadline exceeded"),
+        );
+        _ = assert_task(
+            &mut conn,
+            &scheduled_task,
+            TaskState::Canceled,
+            Some("deadline exceeded"),
+        );
+        _ = assert_task(
+            &mut conn,
+            &dependent_task,
+            TaskState::Canceled,
+            Some("deadline exceeded"),
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_claim_timeout_cancel() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 0);
+        let task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_timeout(1);
+
+        enqueue(&mut conn, &task).await.unwrap();
+        dequeue(&mut conn, std::slice::from_ref(&queue), None)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let (retry, canceled) = claim_timeout(&mut conn, &queue, 1).await.unwrap();
+
+        assert_eq!(retry, 0);
+        assert_eq!(canceled, 1);
+        assert_task(
+            &mut conn,
+            &task,
+            TaskState::Canceled,
+            Some("claim timeout triggered"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_claim_timeout_retry() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 0);
+        let task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_timeout(1)
+            .with_retry(3, 0);
+
+        enqueue(&mut conn, &task).await.unwrap();
+        dequeue(&mut conn, std::slice::from_ref(&queue), None)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let (retry, canceled) = claim_timeout(&mut conn, &queue, 1).await.unwrap();
+
+        assert_eq!(retry, 1);
+        assert_eq!(canceled, 0);
+        assert_task(
+            &mut conn,
+            &task,
+            TaskState::Pending,
+            Some("claim timeout triggered"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_claim_timeout_retry_interval() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 0);
+        let task = queue
+            .generate_task_with_options(None, TaskOptions::default())
+            .with_timeout(1)
+            .with_retry(3, 1000);
+
+        enqueue(&mut conn, &task).await.unwrap();
+        dequeue(&mut conn, std::slice::from_ref(&queue), None)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let (retry, canceled) = claim_timeout(&mut conn, &queue, 1).await.unwrap();
+
+        assert_eq!(retry, 1);
+        assert_eq!(canceled, 0);
+        assert_task(
+            &mut conn,
+            &task,
+            TaskState::Retry,
+            Some("claim timeout triggered"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_claim_retention() {
+        let mut conn = new_redis_conn().await;
+
+        let opt = TaskOptions {
+            retention_ms: 1,
+            ..Default::default()
+        };
+        let queue = Queue::new("test_topic", 0);
+
+        let succeed_task = simple_dequeue(&mut conn, &queue, Some(opt.clone())).await;
+        succeed(
+            &mut conn,
+            &queue,
+            &succeed_task.id,
+            succeed_task.runtime.stream_id.clone().unwrap().as_ref(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let failed_task = simple_dequeue(&mut conn, &queue, Some(opt.clone())).await;
+        fail(
+            &mut conn,
+            &queue,
+            &failed_task.id,
+            failed_task.runtime.stream_id.clone().unwrap().as_ref(),
+            "something wrong",
+        )
+        .await
+        .unwrap();
+
+        let canceled_task = simple_dequeue(&mut conn, &queue, Some(opt.clone())).await;
+        cancel(
+            &mut conn,
+            &queue,
+            &canceled_task.id,
+            canceled_task.runtime.stream_id.clone().unwrap().as_ref(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let claimed = claim_retention(&mut conn, &queue).await.unwrap();
+        assert_eq!(claimed, 3);
+
+        assert!(
+            peek_task(&mut conn, &queue, &succeed_task.id)
+                .await
+                .is_err()
+        );
+        assert!(peek_task(&mut conn, &queue, &failed_task.id).await.is_err());
+        assert!(
+            peek_task(&mut conn, &queue, &canceled_task.id)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_cancel_pending() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 0);
+        let tasks = (0..10)
+            .map(|_| queue.generate_task_with_options(None, TaskOptions::default()))
+            .collect::<Vec<_>>();
+
+        for task in &tasks {
+            enqueue(&mut conn, task).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        enqueue(
+            &mut conn,
+            &queue.generate_task_with_options(None, TaskOptions::default()),
+        )
+        .await
+        .unwrap();
+
+        let canceled_count = cancel_pending(&mut conn, &queue, 1000).await.unwrap();
+        assert_eq!(canceled_count, 10);
+
+        for task in tasks.iter() {
+            assert_task(&mut conn, task, TaskState::Canceled, Some("cancel pending")).await;
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_queue_stats() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 0);
+
+        let hysteria_stats = hysteria_enqueue(&mut conn, &queue).await;
+        let stats = queue_stats(&mut conn, &queue).await.unwrap();
+
+        assert_eq!(hysteria_stats, stats)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_topic_stats() {
+        let mut conn = new_redis_conn().await;
+
+        let queue_list = [
+            Queue::new("test_topic", 0),
+            Queue::new("test_topic", 1),
+            Queue::new("test_topic", 2),
+            Queue::new_with_slot("slot", "test_topic", 0),
+            Queue::new_with_slot("slot2", "test_topic", 0),
+        ];
+
+        let mut hysteria_stats = Stats::default();
+        for queue in queue_list {
+            let stats = hysteria_enqueue(&mut conn, &queue).await;
+            hysteria_stats.pending_count += stats.pending_count;
+            hysteria_stats.active_count += stats.active_count;
+            hysteria_stats.scheduled_count += stats.scheduled_count;
+            hysteria_stats.dependent_count += stats.dependent_count;
+            hysteria_stats.completed_count += stats.completed_count;
+        }
+
+        let stats = topic_stats(&mut conn, "test_topic").await.unwrap();
+
+        assert_eq!(hysteria_stats, stats);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_topics() {
+        let mut conn = new_redis_conn().await;
+
+        let topic_list = topics(&mut conn).await.unwrap();
+        assert!(topic_list.is_empty());
+
+        enqueue(&mut conn, &Task::new("test_topic", None))
+            .await
+            .unwrap();
+
+        let topic_list = topics(&mut conn).await.unwrap();
+        assert_eq!(topic_list.len(), 1);
+        assert_eq!(topic_list[0].topic, "test_topic");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_queues() {
+        let mut conn = new_redis_conn().await;
+
+        let queue_list = queues(&mut conn, "test_topic").await.unwrap();
+        assert!(queue_list.is_empty());
+
+        enqueue(&mut conn, &Task::new("test_topic", None))
+            .await
+            .unwrap();
+
+        let queue_list = queues(&mut conn, "test_topic").await.unwrap();
+        assert_eq!(queue_list.len(), 1);
+        assert_eq!(queue_list[0].as_ref().topic, "test_topic");
+        assert_eq!(queue_list[0].as_ref().slot, None);
+        assert_eq!(queue_list[0].as_ref().priority, 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_all_queues() {
+        let mut conn = new_redis_conn().await;
+
+        let queue_list = all_queues(&mut conn).await.unwrap();
+        assert!(queue_list.is_empty());
+
+        enqueue(&mut conn, &Task::new("test_topic", None))
+            .await
+            .unwrap();
+
+        let queue_list = all_queues(&mut conn).await.unwrap();
+        assert_eq!(queue_list.len(), 1);
+        assert_eq!(queue_list[0].topic.topic, "test_topic");
+        assert_eq!(queue_list[0].queues[0].as_ref().slot, None);
+        assert_eq!(queue_list[0].queues[0].as_ref().priority, 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_delete_queue() {
+        let mut conn = new_redis_conn().await;
+
+        let queue = Queue::new("test_topic", 0);
+
+        hysteria_enqueue(&mut conn, &queue).await;
+
+        delete_queue(&mut conn, &queue).await.unwrap();
+
+        let stats = queue_stats(&mut conn, &queue).await.unwrap();
+        assert_eq!(stats, Stats::default());
+
+        let qname = QName::from(&queue);
+        let queue_prefix = format!("easy-mq:{}:*", qname.0);
+
+        println!("prefix: {}", queue_prefix);
+        let ret: Vec<String> = Cmd::keys(queue_prefix)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(ret.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_delete_topic() {
+        let mut conn = new_redis_conn().await;
+
+        let queue_list = [
+            Queue::new("test_topic", 0),
+            Queue::new("test_topic", 1),
+            Queue::new("test_topic", 2),
+            Queue::new_with_slot("slot", "test_topic", 0),
+            Queue::new_with_slot("slot2", "test_topic", 0),
+        ];
+
+        for queue in queue_list {
+            hysteria_enqueue(&mut conn, &queue).await;
+        }
+
+        delete_topic(&mut conn, "test_topic").await.unwrap();
+
+        let queue_list = queues(&mut conn, "test_topic").await.unwrap();
+        assert!(queue_list.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_peek_task_none() {
+        let mut conn = new_redis_conn().await;
+
+        let peek_ret = peek_task(&mut conn, &Queue::new("test_topic", 1), "nothing").await;
+        assert!(peek_ret.is_err());
+
+        println!("{:?}", peek_ret)
     }
 }

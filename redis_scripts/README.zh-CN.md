@@ -8,4 +8,5 @@
 | easy-mq:`qname`:dependent             | Set            | 存储依赖其他任务执行完毕的任务集. member: `dependent_task_key` (easy-mq:{qname}:dependent:{task_id}) |
 | easy-mq:`qname`:dependent:{`task_id`} | Hash           | 存储依赖其他任务执行完毕的任务. key: 依赖任务的`task_key`; value: 任务完成状态                       |
 | easy-mq:`qname`:archive               | SortedSet      | 存储执行完毕的任务. score: 完成时间; member: `task_key`                                              |
+| easy-mq:`qname`:archive_stream        | SortedSet      | 存储执行完毕的 stream_id. score: 完成时间; member: `stream_id`                                       |
 | easy-mq:`qname`:deadline              | SortedSet      | 存储有截止时间的任务. score: 截止时间; member: `task_key`                                            |

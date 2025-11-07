@@ -1,7 +1,12 @@
 {
     "cSpell.words": [
+        "deadpool",
         "qname"
     ],
     "Lua.runtime.version": "Lua 5.1",
-    "Lua.diagnostics.globals": ["redis", "KEYS", "ARGV"]
+    "Lua.diagnostics.globals": [
+        "redis",
+        "KEYS",
+        "ARGV"
+    ]
 }

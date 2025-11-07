@@ -5,7 +5,7 @@ use crate::errors::Result;
 
 /// 定义任务结构体
 /// Define the Task struct
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Task {
     /// 任务主题，用于标识任务的类别或分组
     /// Task topic, used to identify the category or group of the task
@@ -30,7 +30,7 @@ pub struct Task {
 
 /// 定义任务选项结构体，包含任务的配置参数
 /// Define the TaskOptions struct, contains configuration parameters for the task
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TaskOptions {
     /// 任务优先级，值越小优先级越高 默认为0, 可以使用负数来表达更高的优先级
     /// Task priority, lower value indicates higher priority.
@@ -73,7 +73,7 @@ pub struct TaskOptions {
 
 /// 定义重试策略结构体，包含重试相关参数
 /// Define the Retry struct, contains parameters related to retry behavior
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct Retry {
     /// 最大重试次数
     /// Maximum number of retry attempts
@@ -86,7 +86,7 @@ pub struct Retry {
 
 /// 定义任务调度时间的枚举类型
 /// Define the ScheduledAt enum for specifying task scheduling time or conditions
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ScheduledAt {
     /// 指定任务在某个时间戳（单位: 毫秒）执行
     /// Specifies that the task should be executed at a certain timestamp (in milliseconds)
@@ -99,7 +99,7 @@ pub enum ScheduledAt {
 
 /// 定义依赖完成的任务.
 /// Define the task to be completed by the dependency.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CompletedTask {
     /// 任务主题，用于标识任务的类别或分组
     /// Task topic, used to identify the category or group of the task
@@ -125,7 +125,7 @@ pub struct CompletedTask {
 
 /// 定义任务运行时结构体，包含任务的运行时状态信息
 /// Define the TaskRuntime struct, contains runtime state information for a task
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct TaskRuntime {
     /// 任务当前状态，描述任务的生命周期阶段
     /// Current state of the task, describes the lifecycle stage of the task
@@ -191,7 +191,7 @@ pub struct TaskRuntime {
 
 /// 定义任务状态枚举，描述任务的各种可能状态，支持序列化、反序列化和比较
 /// Define the TaskState enum, describes the possible states of a task, supports serialization/deserialization and comparison
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Default, Clone, Copy)]
 pub enum TaskState {
     /// 默认状态，任务等待处理
     /// Default state, task is waiting to be processed
@@ -247,6 +247,14 @@ impl Task {
         payload: Option<Vec<u8>>,
     ) -> Task {
         Self::new_with(topic, id, payload, TaskOptions::default())
+    }
+
+    pub fn new_with_options(
+        topic: impl Into<String>,
+        payload: Option<Vec<u8>>,
+        options: TaskOptions,
+    ) -> Task {
+        Self::new_with(topic, uuid::Uuid::new_v4().to_string(), payload, options)
     }
 
     /// 创建一个带有指定 id、payload 和选项的 Task 实例
@@ -350,6 +358,22 @@ impl Task {
             slot: self.options.slot.clone(),
             state,
         }
+    }
+
+    pub fn state(&self) -> TaskState {
+        self.runtime.state
+    }
+
+    /// 获取任务的 stream_id
+    /// Get the stream_id of the task
+    pub fn stream_id(&self) -> Option<&str> {
+        self.runtime.stream_id.as_deref()
+    }
+
+    /// 获取任务的运行时信息
+    /// Get the runtime information of the task
+    pub fn runtime(&self) -> &TaskRuntime {
+        &self.runtime
     }
 }
 

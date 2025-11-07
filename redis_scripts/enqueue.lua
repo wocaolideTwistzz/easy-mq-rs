@@ -25,12 +25,12 @@ local stream_key = KEYS[2]
 local deadline_key = KEYS[3]
 
 local task_data = ARGV[1]
-local current = tonumber(ARGV[2])
-local timeout = tonumber(ARGV[3])
-local deadline = tonumber(ARGV[4])
-local max_retries = tonumber(ARGV[5])
-local retry_interval = tonumber(ARGV[6])
-local retention = tonumber(ARGV[7])
+local current = ARGV[2]
+local timeout = ARGV[3]
+local deadline = tonumber(ARGV[4]) or 0
+local max_retries = ARGV[5]
+local retry_interval = ARGV[6]
+local retention = ARGV[7]
 
 -- 1. 将任务放入Pending队列.
 -- 1. Put the task into the Pending queue.
@@ -38,7 +38,8 @@ local stream_id = redis.call('XADD', stream_key, '*',
     'task_key', task_key,
     'timeout', timeout,
     'max_retries', max_retries,
-    'retry_interval', retry_interval
+    'retry_interval', retry_interval,
+    'retention', retention
 )
 
 -- 2. 创建任务队列默认消费者组.
