@@ -1,3 +1,8 @@
+use std::{
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
+
 use bincode::config::{self};
 use serde::{Deserialize, Serialize};
 
@@ -276,6 +281,21 @@ impl Task {
 
     /// 创建一个新的 Task，并通过bincode序列化 payload 来填充 payload 字段
     /// Creates a new Task instance by bincode serializing the payload and filling the payload field
+    pub fn try_new<S>(topic: impl Into<String>, payload: S) -> Result<Task>
+    where
+        S: Serialize,
+    {
+        let payload_buf = bincode::serde::encode_to_vec(payload, config::standard())?;
+        Ok(Self::new_with(
+            topic,
+            uuid::Uuid::new_v4().to_string(),
+            Some(payload_buf),
+            TaskOptions::default(),
+        ))
+    }
+
+    /// 创建一个新的 Task，并通过bincode序列化 payload 来填充 payload 字段
+    /// Creates a new Task instance by bincode serializing the payload and filling the payload field
     pub fn try_new_with_serde<S>(
         topic: impl Into<String>,
         id: impl Into<String>,
@@ -287,6 +307,13 @@ impl Task {
     {
         let payload_buf = bincode::serde::encode_to_vec(payload, config::standard())?;
         Ok(Self::new_with(topic, id, Some(payload_buf), options))
+    }
+
+    /// 设置任务的 id
+    /// Sets the id for the task
+    pub fn with_id(mut self, id: impl Into<String>) -> Task {
+        self.id = id.into();
+        self
     }
 
     /// 设置任务的优先级 值越小优先级越高，可以使用负数来表达更高的优先级
@@ -345,8 +372,8 @@ impl Task {
     /// can depend each other in redis cluster mode.
     /// The default slot is the concurrent topic and does not need to be set in redis non-cluster mode.
     /// In cluster mode, task from different topics but dependent on each other need to set this value.
-    pub fn with_slot(mut self, slot: String) -> Task {
-        self.options.slot = Some(slot);
+    pub fn with_slot(mut self, slot: impl Into<String>) -> Task {
+        self.options.slot = Some(slot.into());
         self
     }
 
@@ -374,6 +401,28 @@ impl Task {
     /// Get the runtime information of the task
     pub fn runtime(&self) -> &TaskRuntime {
         &self.runtime
+    }
+
+    /// 获取任务的当前截止时间
+    /// Get the current deadline of the task
+    pub fn current_deadline(&self) -> Option<Instant> {
+        match self.options.deadline_ms {
+            Some(deadline) => {
+                if deadline > START.1 {
+                    START
+                        .0
+                        .checked_add(Duration::from_millis(deadline - START.1))
+                } else {
+                    START
+                        .0
+                        .checked_sub(Duration::from_millis(START.1 - deadline))
+                }
+            }
+            None => match self.options.timeout_ms {
+                Some(timeout) => Instant::now().checked_add(Duration::from_millis(timeout)),
+                None => None,
+            },
+        }
     }
 }
 
@@ -474,3 +523,12 @@ impl TaskState {
         )
     }
 }
+
+static START: LazyLock<(Instant, u64)> = LazyLock::new(|| {
+    let now = Instant::now();
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    (now, timestamp_ms)
+});

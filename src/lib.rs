@@ -1,5 +1,6 @@
 pub mod broker;
 pub mod claimer;
+pub mod consumer;
 pub mod errors;
 pub mod instance;
 pub mod model;

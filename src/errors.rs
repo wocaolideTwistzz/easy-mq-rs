@@ -1,3 +1,5 @@
+use std::fmt::{Debug, Display};
+
 use bincode::error::{DecodeError, EncodeError};
 use deadpool_redis::{BuildError, ConfigError, PoolError, redis::RedisError};
 use thiserror::Error;
@@ -54,6 +56,54 @@ pub enum Error {
 
     #[error("invalid topic name")]
     InvalidTopicName,
+
+    #[error("process task timeout")]
+    ProcessTaskTimeout,
+
+    #[error("disable retry")]
+    DisableRetry,
+
+    #[error("custom message {0}")]
+    CustomMessage(String),
+
+    #[error("custom error {0}")]
+    Custom(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 pub type Result<T> = std::result::Result<T, crate::errors::Error>;
+
+impl Error {
+    pub fn custom<M>(message: M) -> Error
+    where
+        M: Debug + Display + Send + Sync + 'static,
+    {
+        Error::CustomMessage(message.to_string())
+    }
+}
+
+pub trait OptionExt<T> {
+    fn ok_or_easy_mq<M>(self, message: M) -> Result<T>
+    where
+        M: Debug + Display + Send + Sync + 'static;
+}
+
+impl<T> OptionExt<T> for Option<T> {
+    fn ok_or_easy_mq<M>(self, message: M) -> Result<T>
+    where
+        M: Debug + Display + Send + Sync + 'static,
+    {
+        match self {
+            Some(ok) => Ok(ok),
+            None => Err(Error::custom(message)),
+        }
+    }
+}
+
+impl<T> From<Box<T>> for Error
+where
+    T: std::error::Error + Send + Sync + 'static,
+{
+    fn from(value: Box<T>) -> Self {
+        Error::Custom(value)
+    }
+}

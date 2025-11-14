@@ -7,14 +7,16 @@ use tracing::{debug, warn};
 use crate::{
     broker::{Broker, redis::RedisBroker},
     errors::Result,
-    model::{Queue, TopicQueuesInfo},
+    model::{Queue, TopicInfo, TopicQueuesInfo},
 };
 
 #[derive(Debug)]
 pub struct Claimer<B: Broker> {
     broker: Arc<B>,
 
-    queues: ArcSwap<Vec<TopicQueuesInfo>>,
+    topic_queues: ArcSwap<Vec<TopicQueuesInfo>>,
+
+    queues: ArcSwap<Vec<Queue>>,
 }
 
 impl Claimer<RedisBroker> {
@@ -77,6 +79,10 @@ pub struct ClaimConfig {
     /// Pending task cancel claim interval (seconds) default disabled
     pub cancel_pending_claim_interval_sec: u64,
 
+    /// 指定主题
+    /// Specified topics
+    pub specified_topics: Option<Vec<String>>,
+
     /// 刷新队列列表的间隔 (秒) 默认60秒
     /// Refresh queue list interval (seconds) default 60 seconds
     pub refresh_queues_interval_sec: u64,
@@ -94,29 +100,81 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
     pub fn new(broker: Arc<B>) -> Self {
         Self {
             broker,
+            topic_queues: ArcSwap::new(Arc::new(Vec::new())),
             queues: ArcSwap::new(Arc::new(Vec::new())),
         }
     }
 
     /// 设置当前 claimer 托管的队列列表
     /// Set the queue list managed by the claimer
-    pub fn set_queues(&self, queues: Vec<TopicQueuesInfo>) {
+    pub fn set_queues(&self, queues: Vec<Queue>) {
         self.queues.store(Arc::new(queues));
     }
 
     /// 获取当前 claimer 托管的队列列表
     /// Get the queue list managed by the claimer
-    pub fn get_queues(&self) -> Arc<Vec<TopicQueuesInfo>> {
+    pub fn get_queues(&self) -> Arc<Vec<Queue>> {
         self.queues.load().clone()
+    }
+
+    /// 获取当前 claimer 托管的主题队列列表
+    /// Get the topic queue list managed by the claimer
+    pub fn get_topic_queues(&self) -> Arc<Vec<TopicQueuesInfo>> {
+        self.topic_queues.load().clone()
     }
 
     /// 刷新当前 claimer 托管的队列列表
     /// Refresh the queue list managed by the claimer
-    pub async fn refresh_queues(&self) -> Result<usize> {
-        let queues = self.broker.all_queues().await?;
+    pub async fn refresh_topic_queues(&self) -> Result<usize> {
+        let topic_queues = self.broker.all_queues().await?;
+        let queues = topic_queues
+            .iter()
+            .flat_map(|v| v.queues.iter().map(|vv| vv.as_ref().clone()))
+            .collect::<Vec<Queue>>();
         let n = queues.len();
+
+        self.topic_queues.store(Arc::new(topic_queues));
         self.queues.store(Arc::new(queues));
+
         Ok(n)
+    }
+
+    /// 按主题刷新当前 claimer 托管的队列列表
+    /// Refresh the queue list managed by the claimer by topics
+    pub async fn refresh_topic_queues_by_topics(&self, topics: &[String]) -> Result<usize> {
+        let mut total = 0_usize;
+
+        let mut topic_info = vec![];
+        let mut queues = vec![];
+
+        for topic in topics {
+            let queue_infos = self.broker.queues(topic).await?;
+            if !queue_infos.is_empty() {
+                let last_insert_at_ms = queue_infos
+                    .iter()
+                    .max_by(|a, b| a.last_insert_at_ms.cmp(&b.last_insert_at_ms))
+                    .map(|v| v.last_insert_at_ms)
+                    .unwrap_or_default();
+
+                queue_infos
+                    .iter()
+                    .for_each(|qf| queues.push(qf.as_ref().clone()));
+
+                total += queue_infos.len();
+
+                topic_info.push(TopicQueuesInfo {
+                    topic: TopicInfo {
+                        topic: topic.clone(),
+                        last_insert_at_ms,
+                    },
+                    queues: queue_infos,
+                });
+            }
+        }
+        self.topic_queues.store(Arc::new(topic_info));
+        self.queues.store(Arc::new(queues));
+
+        Ok(total)
     }
 
     /// 手动 claim 定时任务
@@ -157,9 +215,20 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
 
     /// 清理空闲超时的主题
     /// Clean up idle expired topics
-    pub async fn clean_topics(&self, min_idle_ms: u64) -> Result<usize> {
-        self.refresh_queues().await?;
-        let topic_queues_list = self.queues.load();
+    pub async fn clean_topics(
+        &self,
+        specified_topics: Option<&[String]>,
+        min_idle_ms: u64,
+    ) -> Result<usize> {
+        match specified_topics {
+            Some(topics) => {
+                self.refresh_topic_queues_by_topics(topics).await?;
+            }
+            None => {
+                self.refresh_topic_queues().await?;
+            }
+        }
+        let topic_queues_list = self.topic_queues.load();
 
         let now = chrono::Local::now().timestamp_millis() as u64;
         let mut n = 0;
@@ -172,15 +241,16 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
         Ok(n)
     }
 
-    pub fn start(self, config: ClaimConfig) -> BackgroundHandle {
-        let claimer = Arc::new(self);
+    pub fn start(self: Arc<Self>, config: ClaimConfig) -> BackgroundHandle {
+        let claimer = self;
 
         let mut handlers = BackgroundHandle { handles: vec![] };
         if config.refresh_queues_interval_sec > 0 {
             let claimer = claimer.clone();
+            let specified_topics = config.specified_topics.clone();
             let handler = tokio::spawn(async move {
                 claimer
-                    .run_refresh_queues(config.refresh_queues_interval_sec)
+                    .run_refresh_queues(specified_topics, config.refresh_queues_interval_sec)
                     .await;
             });
             handlers.handles.push(handler);
@@ -250,6 +320,7 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
             let handler = tokio::spawn(async move {
                 claimer
                     .run_clean_topics(
+                        config.specified_topics,
                         config.clean_topics_interval_sec,
                         config.clean_topics_min_idle_sec,
                     )
@@ -262,13 +333,26 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
 
     /// 定时刷新队列列表
     /// Run refresh queues periodically
-    pub async fn run_refresh_queues(&self, interval_sec: u64) {
-        loop {
-            match self.refresh_queues().await {
-                Ok(n) => debug!("refresh queues success, {} queues", n),
-                Err(e) => warn!("refresh queues failed: {}", e),
-            }
-            tokio::time::sleep(Duration::from_secs(interval_sec)).await;
+    pub async fn run_refresh_queues(
+        &self,
+        specified_topics: Option<Vec<String>>,
+        interval_sec: u64,
+    ) {
+        match specified_topics {
+            Some(topics) => loop {
+                match self.refresh_topic_queues_by_topics(&topics).await {
+                    Ok(n) => debug!("refresh queues by topics success - count: {}", n),
+                    Err(e) => warn!("refresh queues by topics failed: {}", e),
+                }
+                tokio::time::sleep(Duration::from_secs(interval_sec)).await;
+            },
+            None => loop {
+                match self.refresh_topic_queues().await {
+                    Ok(n) => debug!("refresh queues success - count: {}", n),
+                    Err(e) => warn!("refresh queues failed: {}", e),
+                }
+                tokio::time::sleep(Duration::from_secs(interval_sec)).await;
+            },
         }
     }
 
@@ -276,14 +360,12 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
     /// Run claim `scheduled` periodically
     pub async fn run_scheduled_claim(&self, interval_sec: u64) {
         loop {
-            let topic_queues = self.queues.load();
+            let queues = self.queues.load();
 
-            for topic_queue in topic_queues.as_ref() {
-                for queue in &topic_queue.queues {
-                    match self.claim_scheduled(queue.as_ref()).await {
-                        Ok(n) => debug!("claim scheduled tasks: {}", n),
-                        Err(e) => warn!("claim scheduled tasks failed: {}", e),
-                    }
+            for queue in queues.as_ref() {
+                match self.claim_scheduled(queue).await {
+                    Ok(n) => debug!("claim scheduled tasks: {}", n),
+                    Err(e) => warn!("claim scheduled tasks failed: {}", e),
                 }
 
                 tokio::time::sleep(Duration::from_secs(interval_sec)).await;
@@ -295,17 +377,15 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
     /// Run claim `dependent` periodically
     pub async fn run_dependent_claim(&self, interval_sec: u64) {
         loop {
-            let topic_queues = self.queues.load();
+            let queues = self.queues.load();
 
-            for topic_queue in topic_queues.as_ref() {
-                for queue in &topic_queue.queues {
-                    match self.claim_dependent(queue.as_ref()).await {
-                        Ok((pending, canceled)) => debug!(
-                            "claim dependent tasks: pending - {}, canceled - {}",
-                            pending, canceled
-                        ),
-                        Err(e) => warn!("claim dependent tasks failed: {}", e),
-                    }
+            for queue in queues.as_ref() {
+                match self.claim_dependent(queue).await {
+                    Ok((pending, canceled)) => debug!(
+                        "claim dependent tasks: pending - {}, canceled - {}",
+                        pending, canceled
+                    ),
+                    Err(e) => warn!("claim dependent tasks failed: {}", e),
                 }
             }
 
@@ -318,14 +398,12 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
     pub async fn run_cancel_pending_claim(&self, interval_sec: u64, min_pending_sec: u64) {
         let min_pending_ms = min_pending_sec * 1000;
         loop {
-            let topic_queues = self.queues.load();
+            let queues = self.queues.load();
 
-            for topic_queue in topic_queues.as_ref() {
-                for queue in &topic_queue.queues {
-                    match self.cancel_pending(queue.as_ref(), min_pending_ms).await {
-                        Ok(n) => debug!("cancel pending tasks: {}", n),
-                        Err(e) => warn!("cancel pending tasks failed: {}", e),
-                    }
+            for queue in queues.as_ref() {
+                match self.cancel_pending(queue, min_pending_ms).await {
+                    Ok(n) => debug!("cancel pending tasks: {}", n),
+                    Err(e) => warn!("cancel pending tasks failed: {}", e),
                 }
             }
 
@@ -337,14 +415,12 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
     /// Run claim `deadline` periodically
     pub async fn run_deadline_claim(&self, interval_sec: u64) {
         loop {
-            let topic_queues = self.queues.load();
+            let queues = self.queues.load();
 
-            for topic_queue in topic_queues.as_ref() {
-                for queue in &topic_queue.queues {
-                    match self.claim_deadline(queue.as_ref()).await {
-                        Ok(n) => debug!("claim deadline tasks: {}", n),
-                        Err(e) => warn!("claim deadline tasks failed: {}", e),
-                    }
+            for queue in queues.as_ref() {
+                match self.claim_deadline(queue).await {
+                    Ok(n) => debug!("claim deadline tasks: {}", n),
+                    Err(e) => warn!("claim deadline tasks failed: {}", e),
                 }
             }
 
@@ -358,17 +434,15 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
         let min_idle_ms = min_idle_sec * 1000;
 
         loop {
-            let topic_queues = self.queues.load();
+            let queues = self.queues.load();
 
-            for topic_queue in topic_queues.as_ref() {
-                for queue in &topic_queue.queues {
-                    match self.claim_timeout(queue.as_ref(), min_idle_ms).await {
-                        Ok((pending, canceled)) => debug!(
-                            "claim timeout tasks: pending - {}, canceled - {}",
-                            pending, canceled
-                        ),
-                        Err(e) => warn!("claim timeout tasks failed: {}", e),
-                    }
+            for queue in queues.as_ref() {
+                match self.claim_timeout(queue, min_idle_ms).await {
+                    Ok((pending, canceled)) => debug!(
+                        "claim timeout tasks: pending - {}, canceled - {}",
+                        pending, canceled
+                    ),
+                    Err(e) => warn!("claim timeout tasks failed: {}", e),
                 }
             }
 
@@ -380,14 +454,12 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
     /// Run claim `retention` periodically
     pub async fn run_retention_claim(&self, interval_sec: u64) {
         loop {
-            let topic_queues = self.queues.load();
+            let queues = self.queues.load();
 
-            for topic_queue in topic_queues.as_ref() {
-                for queue in &topic_queue.queues {
-                    match self.claim_retention(queue.as_ref()).await {
-                        Ok(n) => debug!("claim retention tasks: {}", n),
-                        Err(e) => warn!("claim retention tasks failed: {}", e),
-                    }
+            for queue in queues.as_ref() {
+                match self.claim_retention(queue).await {
+                    Ok(n) => debug!("claim retention tasks: {}", n),
+                    Err(e) => warn!("claim retention tasks failed: {}", e),
                 }
             }
 
@@ -395,10 +467,18 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
         }
     }
 
-    pub async fn run_clean_topics(&self, interval_sec: u64, min_idle_sec: u64) {
+    pub async fn run_clean_topics(
+        &self,
+        specified_topics: Option<Vec<String>>,
+        interval_sec: u64,
+        min_idle_sec: u64,
+    ) {
         let min_idle_ms = min_idle_sec * 1000;
         loop {
-            match self.clean_topics(min_idle_ms).await {
+            match self
+                .clean_topics(specified_topics.as_deref(), min_idle_ms)
+                .await
+            {
                 Ok(n) => debug!("clean topics: {}", n),
                 Err(e) => warn!("clean topics failed: {}", e),
             }
@@ -417,6 +497,7 @@ impl Default for ClaimConfig {
             timeout_min_idle_sec: 5,
             deadline_claim_interval_sec: 60,
             retention_claim_interval_sec: 60,
+            specified_topics: None,
             refresh_queues_interval_sec: 60,
 
             cancel_pending_min_sec: 0,

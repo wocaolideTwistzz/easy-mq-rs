@@ -1,4 +1,7 @@
-use crate::task::{Task, TaskOptions};
+use crate::{
+    rdb::constant::QName,
+    task::{Task, TaskOptions},
+};
 
 /// 队列/话题 的统计数据
 /// Queue/Topic 's stats
@@ -154,5 +157,11 @@ impl AsRef<TopicInfo> for TopicQueuesInfo {
 impl AsRef<Vec<QueueInfo>> for TopicQueuesInfo {
     fn as_ref(&self) -> &Vec<QueueInfo> {
         &self.queues
+    }
+}
+
+impl std::fmt::Display for Queue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        QName::from(self).fmt(f)
     }
 }

@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crate::{
     broker::{Broker, redis::RedisBroker},
@@ -12,6 +12,14 @@ use crate::{
 #[derive(Debug)]
 pub struct Instance<B: Broker> {
     broker: Arc<B>,
+}
+
+impl<B: Broker> Clone for Instance<B> {
+    fn clone(&self) -> Self {
+        Self {
+            broker: self.broker.clone(),
+        }
+    }
 }
 
 impl Instance<RedisBroker> {
@@ -67,47 +75,6 @@ impl<B: Broker + Send + Sync + 'static> Instance<B> {
     /// Non-blocking dequeue a task from the specified queue list
     pub async fn try_dequeue(&self, queues: &[Queue]) -> Result<Option<Task>> {
         self.broker.dequeue(queues).await
-    }
-
-    /// 阻塞从指定队列列表中消费一个任务
-    /// Blocking dequeue a task from the specified queue list
-    pub async fn dequeue(&self, queues: &[Queue], interval: Duration) -> Result<Task> {
-        loop {
-            match self.try_dequeue(queues).await {
-                Ok(Some(task)) => return Ok(task),
-                Ok(None) => {
-                    tokio::time::sleep(interval).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-
-    /// 无阻塞从指定主题下的队列列表中取出一个任务
-    /// Non-blocking dequeue a task from the specified topic's queue list
-    pub async fn try_dequeue_topic(&self, topic: &str) -> Result<Option<Task>> {
-        let queues = self
-            .queues(topic)
-            .await?
-            .into_iter()
-            .map(|q| q.queue)
-            .collect::<Vec<_>>();
-
-        self.try_dequeue(&queues).await
-    }
-
-    /// 阻塞从指定主题下的队列列表中消费一个任务
-    /// Blocking dequeue a task from the specified topic's queue list
-    pub async fn dequeue_topic(&self, topic: &str, interval: Duration) -> Result<Task> {
-        loop {
-            match self.try_dequeue_topic(topic).await {
-                Ok(Some(task)) => return Ok(task),
-                Ok(None) => {
-                    tokio::time::sleep(interval).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
     }
 
     /// 标记任务成功完成
