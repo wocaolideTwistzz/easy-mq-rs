@@ -177,6 +177,12 @@ impl<B: Broker + Send + Sync + 'static> Instance<B> {
         self.broker.queues(topic).await
     }
 
+    /// 获取所有队列
+    /// Get all queues
+    pub async fn all_queues(&self) -> Result<Vec<crate::model::TopicQueuesInfo>> {
+        self.broker.all_queues().await
+    }
+
     /// 获取所有主题列表
     /// Get all topics
     pub async fn topics(&self) -> Result<Vec<crate::model::TopicInfo>> {

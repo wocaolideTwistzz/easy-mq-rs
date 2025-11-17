@@ -63,6 +63,9 @@ pub enum Error {
     #[error("disable retry")]
     DisableRetry,
 
+    #[error("dependent tasks not found")]
+    DependentTasksNotFound,
+
     #[error("custom message {0}")]
     CustomMessage(String),
 

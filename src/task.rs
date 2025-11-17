@@ -532,3 +532,12 @@ static START: LazyLock<(Instant, u64)> = LazyLock::new(|| {
         .as_millis() as u64;
     (now, timestamp_ms)
 });
+
+impl ScheduledAt {
+    pub fn depends_on(&self) -> crate::errors::Result<&[CompletedTask]> {
+        match self {
+            ScheduledAt::TimestampMs(_) => Err(crate::errors::Error::DependentTasksNotFound),
+            ScheduledAt::DependsOn(tasks) => Ok(tasks),
+        }
+    }
+}

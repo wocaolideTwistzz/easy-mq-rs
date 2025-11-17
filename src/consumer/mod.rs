@@ -72,6 +72,10 @@ where
         }
     }
 
+    pub fn clone_instance(&self) -> Instance<B> {
+        self.instance.clone()
+    }
+
     pub async fn run<H>(mut self, handler: H)
     where
         H: Handler + Send + Sync + 'static,
