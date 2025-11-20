@@ -357,10 +357,6 @@ impl Task {
     /// 设置任务的执行时间或依赖条件
     /// Sets the scheduled time or dependency condition of the task
     pub fn with_scheduled(mut self, scheduled_at: ScheduledAt) -> Task {
-        match scheduled_at {
-            ScheduledAt::TimestampMs(_) => self.runtime.state = TaskState::Scheduled,
-            ScheduledAt::DependsOn(_) => self.runtime.state = TaskState::Dependent,
-        }
         self.options.scheduled_at = Some(scheduled_at);
         self
     }
@@ -538,6 +534,18 @@ impl ScheduledAt {
         match self {
             ScheduledAt::TimestampMs(_) => Err(crate::errors::Error::DependentTasksNotFound),
             ScheduledAt::DependsOn(tasks) => Ok(tasks),
+        }
+    }
+}
+
+impl CompletedTask {
+    pub fn new(topic: impl Into<String>, id: impl Into<String>, state: TaskCompletedState) -> Self {
+        CompletedTask {
+            topic: topic.into(),
+            id: id.into(),
+            priority: 0,
+            slot: None,
+            state,
         }
     }
 }

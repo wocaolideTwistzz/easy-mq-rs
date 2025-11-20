@@ -1,13 +1,13 @@
 use crate::{
     broker::Broker,
-    errors::{Error, Result},
+    errors::Result,
     model::{Queue, QueueInfo, Stats, TopicInfo, TopicQueuesInfo},
     rdb::{
         all_queues, cancel, cancel_pending, claim_deadline, claim_dependent, claim_retention,
         claim_scheduled, claim_timeout, delete_queue, delete_topic, depend, dequeue, enqueue, fail,
         peek_task, queue_stats, queues, schedule, succeed, topic_stats, topics,
     },
-    task::{Task, TaskState},
+    task::{ScheduledAt, Task},
 };
 
 #[derive(Debug, Clone)]
@@ -62,11 +62,10 @@ impl Broker for RedisBroker {
     async fn add_task(&self, task: &Task) -> Result<()> {
         let mut conn = self.pool.get().await?;
 
-        match task.state() {
-            TaskState::Pending => _ = enqueue(&mut conn, task).await?,
-            TaskState::Scheduled => schedule(&mut conn, task).await?,
-            TaskState::Dependent => depend(&mut conn, task).await?,
-            state => return Err(Error::UnknownTaskState(state.to_string())),
+        match task.options.scheduled_at.as_ref() {
+            Some(ScheduledAt::TimestampMs(_)) => schedule(&mut conn, task).await?,
+            Some(ScheduledAt::DependsOn(_)) => depend(&mut conn, task).await?,
+            None => _ = enqueue(&mut conn, task).await?,
         }
 
         Ok(())
