@@ -38,7 +38,9 @@ pub async fn main() {
                 instance.add_task(&priority_task).await.unwrap();
                 println!(
                     "Queued `topic` [{}] with `id` [{}] with `priority` [{}]",
-                    priority_task.topic, priority_task.id, priority_task.options.priority
+                    priority_task.topic,
+                    priority_task.id,
+                    priority_task.options().priority
                 );
 
                 let retry_task = Task::try_new(topics::SEND_EMAIL, Email::random())
@@ -49,8 +51,8 @@ pub async fn main() {
                     "Queued `topic` [{}] with `id` [{}] with `max_retries` [{}] and `interval_ms` [{}]",
                     retry_task.topic,
                     retry_task.id,
-                    retry_task.options.retry.as_ref().unwrap().max_retries,
-                    retry_task.options.retry.as_ref().unwrap().interval_ms
+                    retry_task.options().retry.as_ref().unwrap().max_retries,
+                    retry_task.options().retry.as_ref().unwrap().interval_ms
                 );
 
                 let timeout_task = Task::try_new(topics::SEND_EMAIL, Email::random())
@@ -62,9 +64,9 @@ pub async fn main() {
                     "Queued `topic` [{}] with `id` [{}] with `max_retries` [{}] and `interval_ms` [{}] and `timeout_ms` [{}]",
                     timeout_task.topic,
                     timeout_task.id,
-                    timeout_task.options.retry.as_ref().unwrap().max_retries,
-                    timeout_task.options.retry.as_ref().unwrap().interval_ms,
-                    timeout_task.options.timeout_ms.as_ref().unwrap()
+                    timeout_task.options().retry.as_ref().unwrap().max_retries,
+                    timeout_task.options().retry.as_ref().unwrap().interval_ms,
+                    timeout_task.options().timeout_ms.as_ref().unwrap()
                 );
 
                 let deadline_task = Task::try_new(topics::SEND_EMAIL, Email::random())
@@ -76,9 +78,9 @@ pub async fn main() {
                     "Queued `topic` [{}] with `id` [{}] with `max_retries` [{}] and `interval_ms` [{}] and `deadline_ms` [{}]",
                     deadline_task.topic,
                     deadline_task.id,
-                    deadline_task.options.retry.as_ref().unwrap().max_retries,
-                    deadline_task.options.retry.as_ref().unwrap().interval_ms,
-                    deadline_task.options.deadline_ms.as_ref().unwrap()
+                    deadline_task.options().retry.as_ref().unwrap().max_retries,
+                    deadline_task.options().retry.as_ref().unwrap().interval_ms,
+                    deadline_task.options().deadline_ms.as_ref().unwrap()
                 );
 
                 let dependent_task = Task::try_new(topics::SEND_EMAIL, Email::random())
@@ -94,7 +96,7 @@ pub async fn main() {
                     dependent_task.topic, dependent_task.id
                 );
                 dependent_task
-                    .options
+                    .options()
                     .scheduled_at
                     .as_ref()
                     .unwrap()
@@ -246,25 +248,27 @@ pub async fn main() {
                 );
                 println!(
                     "Queued `topic` [{}] with `id` [{}], `priority` [{}]",
-                    task.topic, task.id, task.options.priority
+                    task.topic,
+                    task.id,
+                    task.options().priority
                 );
-                if let Some(retry) = task.options.retry {
+                if let Some(retry) = task.options().retry.as_ref() {
                     println!(
                         "With `max_retries` [{}], `retry_interval_ms` [{}],",
                         retry.max_retries, retry.interval_ms
                     );
                 }
-                if let Some(timeout) = task.options.timeout_ms {
+                if let Some(timeout) = task.options().timeout_ms {
                     println!("With `timeout_ms` [{}]", timeout);
                 }
-                if let Some(deadline) = task.options.deadline_ms {
+                if let Some(deadline) = task.options().deadline_ms {
                     println!("With `deadline_ms` [{}]", deadline);
                 }
-                if let Some(ScheduledAt::TimestampMs(scheduled_at)) = task.options.scheduled_at {
+                if let Some(ScheduledAt::TimestampMs(scheduled_at)) = task.options().scheduled_at {
                     println!("With `scheduled_at` [{}]", scheduled_at);
                 }
-                println!("With `retention_ms` [{}]", task.options.retention_ms);
-                if let Some(slot) = task.options.slot {
+                println!("With `retention_ms` [{}]", task.options().retention_ms);
+                if let Some(slot) = task.options().slot.as_ref() {
                     println!("With `slot` [{}]", slot);
                 }
                 println!(

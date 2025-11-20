@@ -26,7 +26,7 @@ pub struct Task {
 
     /// 任务选项，包含任务的配置信息，如优先级、重试策略等
     /// Task options, contains configuration information such as priority, retry strategy, etc.
-    pub options: TaskOptions,
+    pub(crate) options: TaskOptions,
 
     /// 任务运行时数据，包含当前状态，已重试次数，执行结果等
     /// Task runtimes, contains current state, retried, results, etc.
@@ -270,12 +270,23 @@ impl Task {
         payload: Option<Vec<u8>>,
         options: TaskOptions,
     ) -> Task {
+        let runtime = match options.scheduled_at.as_ref() {
+            Some(ScheduledAt::DependsOn(_)) => TaskRuntime {
+                state: TaskState::Dependent,
+                ..Default::default()
+            },
+            Some(ScheduledAt::TimestampMs(_)) => TaskRuntime {
+                state: TaskState::Scheduled,
+                ..Default::default()
+            },
+            None => TaskRuntime::default(),
+        };
         Self {
             topic: topic.into(),
             id: id.into(),
             payload,
             options,
-            runtime: TaskRuntime::default(),
+            runtime,
         }
     }
 
@@ -357,6 +368,10 @@ impl Task {
     /// 设置任务的执行时间或依赖条件
     /// Sets the scheduled time or dependency condition of the task
     pub fn with_scheduled(mut self, scheduled_at: ScheduledAt) -> Task {
+        match scheduled_at {
+            ScheduledAt::DependsOn(_) => self.runtime.state = TaskState::Dependent,
+            ScheduledAt::TimestampMs(_) => self.runtime.state = TaskState::Scheduled,
+        }
         self.options.scheduled_at = Some(scheduled_at);
         self
     }
@@ -397,6 +412,12 @@ impl Task {
     /// Get the runtime information of the task
     pub fn runtime(&self) -> &TaskRuntime {
         &self.runtime
+    }
+
+    /// 获取任务配置选项
+    /// Get the task options
+    pub fn options(&self) -> &TaskOptions {
+        &self.options
     }
 
     /// 获取任务的当前截止时间
