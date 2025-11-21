@@ -14,7 +14,8 @@ local deadline_key = KEYS[4]
 local current = tonumber(ARGV[1]) or 0
 local qname = ARGV[2]
 
-local cursor = '0'
+local start = 0
+local batch = 100
 
 local satisfy_count = 0
 local canceled_count = 0
@@ -115,14 +116,17 @@ local function handle_satisfy(dependent_task_key)
     )
 end
 
-repeat
+while true do
     -- 1. 获取需要依赖其他任务的任务列表
     -- 1. Get a list of tasks that dependent on other tasks.
-    local res = redis.call('SSCAN', dependent_key, cursor, 'COUNT', 100)
-    cursor = res[1]
-    local dep_task_list = res[2]
+    local dep_task_list = redis.call('ZRANGE', dependent_key, start, start + batch - 1)
+    if #dep_task_list == 0 then
+        break
+    end
 
-    for _, dependent_task_key in ipairs(dep_task_list) do
+    for i = 1, #dep_task_list do
+        local dependent_task_key = dep_task_list[i]
+
         -- 2. 获取当前任务依赖的任务及其完成状态
         -- 2. Get the tasks that the current task depends on and their completion state.
         local dependent_tasks = redis.call('HGETALL', dependent_task_key)
@@ -132,9 +136,9 @@ repeat
 
         -- 3. 检查依赖的任务完成状态是否匹配
         -- 3. Check if the completion state of the dependent tasks matches.
-        for i = 1, #dependent_tasks, 2 do
-            local required_task_key = dependent_tasks[i]
-            local required_task_state = dependent_tasks[i + 1]
+        for j = 1, #dependent_tasks, 2 do
+            local required_task_key = dependent_tasks[j]
+            local required_task_state = dependent_tasks[j + 1]
 
             local state = redis.call('HGET', required_task_key, 'state');
             if state == 'canceled' or state == 'succeed' or state == 'failed' then
@@ -167,7 +171,7 @@ repeat
     -- Clean up `dependent`
     if #to_remove_dep_keys > 0 then
         redis.call('DEL', unpack(to_remove_dep_keys))
-        redis.call('SREM', dependent_key, unpack(to_remove_dep_keys))
+        redis.call('ZREM', dependent_key, unpack(to_remove_dep_keys))
         to_remove_dep_keys = {}
     end
 
@@ -177,7 +181,13 @@ repeat
         redis.call('ZADD', archive_key, unpack(to_archive_args))
         to_archive_args = {}
     end
-until cursor == '0'
+
+    -- 任务数量不足batch, 说明已经到末尾
+    -- If the number of tasks is insufficient for a batch, it means we've reached the end of the batch.
+    if #dep_task_list < batch then
+        break
+    end
+end
 
 
 -- 创建任务队列默认消费者组.

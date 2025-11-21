@@ -28,7 +28,7 @@ end
 
 -- 1. 获取过期的任务列表, 限制100个 避免转移时间过长
 -- 1. Retrieve task list which expired, limit to 100 to avoid excessively long transfer times.
-local tasks = redis.call('ZRANGEBYSCORE', deadline_key, '-inf', current, 'LIMIT', 0, 100)
+local tasks = redis.call('ZRANGEBYSCORE', deadline_key, '-INF', current, 'LIMIT', 0, 100)
 
 if #tasks == 0 then
     return 0
@@ -92,6 +92,32 @@ for _, task_key in ipairs(tasks) do
     end
 end
 
+-- 获取过期的 `dependent` 任务列表, 限制100个 避免转移时间过长
+-- Retrieve task list that in `dependent` which expired, limit to 100 to avoid excessively long transfer times.
+local dep_tasks = redis.call('ZRANGEBYSCORE', dependent_key, '-INF', current, 'LIMIT', 0, 100)
+if #dep_tasks > 0 then
+    for _, task_key in ipairs(dep_tasks) do
+        -- 获取任务参数
+        -- get task args.
+        local task_args = redis.call('HMGET', task_key, 'retention')
+        local retention = tonumber(task_args[1]) or 0
+        table.insert(to_remove_dep_keys, to_dependent_task_key(task_key))
+
+        -- 将任务标记为取消
+        -- Mark task state as `canceled`
+        redis.call('HSET', task_key,
+            'state', 'canceled',
+            'completed_at', current,
+            'last_err_at', current,
+            'last_err', 'deadline exceeded'
+        )
+
+        local archive_expired_at = current + retention
+        table.insert(to_archive_args, archive_expired_at)
+        table.insert(to_archive_args, task_key)
+    end
+end
+
 -- 删除还未被消费的任务. (in `pending` state)
 -- Delete tasks that have not yet been consumed. (in `pending` state)
 if #xdel_stream_ids > 0 then
@@ -113,7 +139,7 @@ end
 -- 删除还在等待依赖的任务 (in `dependent` state)
 -- Delete tasks that are still waiting for dependencies
 if #to_remove_dep_keys > 0 then
-    redis.call('SREM', dependent_key, unpack(to_remove_dep_keys))
+    redis.call('ZREM', dependent_key, unpack(to_remove_dep_keys))
     redis.call('DEL', unpack(to_remove_dep_keys))
 end
 

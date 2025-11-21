@@ -61,7 +61,8 @@ pub static SCHEDULE: LazyLock<Script> = LazyLock::new(|| {
 /// -- `ARGV[5]` -> max retries
 /// -- `ARGV[6]` -> retry interval (in milliseconds)
 /// -- `ARGV[7]` -> retention (in milliseconds)
-/// -- `ARGV[8..]` -> field: task_key; value: task_state
+/// -- `ARGV[8]` -> dependent deadline (in milliseconds)
+/// -- `ARGV[9..]` -> field: task_key; value: task_state
 pub static DEPEND: LazyLock<Script> = LazyLock::new(|| {
     Script::new(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

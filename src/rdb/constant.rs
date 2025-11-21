@@ -12,6 +12,8 @@ use crate::{
 
 pub const DEFAULT_WORKER: &str = "default";
 
+pub const FAR_FUTURE_MS: u64 = 86400 * 365 * 30 * 1000;
+
 #[derive(Debug, Clone)]
 pub struct QName(pub String);
 
@@ -372,7 +374,12 @@ impl<'a> ToRedisArgs for RedisTaskArgs<'a> {
             }
             TaskState::Dependent => {
                 self.write_task_msg(out);
-                // -- `ARGV[8..]` -> field: task_key; value: task_state
+                self.task
+                    .options
+                    .dependent_deadline_ms
+                    .unwrap_or(self.current as u64 + FAR_FUTURE_MS)
+                    .write_redis_args(out);
+                // -- `ARGV[9..]` -> field: task_key; value: task_state
                 self.dependent.write_redis_args(out);
             }
             TaskState::Succeed => {

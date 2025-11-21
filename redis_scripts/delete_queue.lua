@@ -47,7 +47,7 @@ delete_zset(scheduled_key)
 
 -- 删除`dependent`中的任务. (还在等待依赖,未执行的任务)
 -- Delete `dependent` tasks. (Tasks that are still waiting for dependencies, not executed)
-local dependent_task_keys = redis.call('SMEMBERS', dependent_key)
+local dependent_task_keys = redis.call('ZRANGE', dependent_key, 0, -1)
 local to_del_keys = {}
 for i = 1, #dependent_task_keys do
     table.insert(to_del_keys, dependent_task_keys[i])

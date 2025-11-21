@@ -10,12 +10,13 @@
 -- `ARGV[5]` -> max retries
 -- `ARGV[6]` -> retry interval (in milliseconds)
 -- `ARGV[7]` -> retention (in milliseconds)
--- `ARGV[8..]` -> field: task_key; value: task_state
+-- `ARGV[8]` -> dependent deadline (in milliseconds)
+-- `ARGV[9..]` -> field: task_key; value: task_state
 
 -- 当没有依赖的任务或者依赖参数不正确, 直接返回错误
 -- Return error when there is no dependent or dependent parameters are incorrect.
 local argv_len = #ARGV
-if argv_len < 9 or argv_len % 2 == 0 then
+if argv_len < 10 or argv_len % 2 == 1 then
     return redis.error_reply("Invalid number of arguments for `dependent`")
 end
 
@@ -39,6 +40,7 @@ local deadline = tonumber(ARGV[4]) or 0
 local max_retries = ARGV[5]
 local retry_interval = ARGV[6]
 local retention = ARGV[7]
+local dependent_deadline = ARGV[8]
 
 -- 2. 存储任务数据
 -- 2. Store task data
@@ -55,14 +57,14 @@ redis.call('HSET', task_key,
 -- 3. 存储当前任务的依赖项.
 -- 3. Store dependencies for current task.
 local args = { dependent_task_key }
-for i = 8, #ARGV do
+for i = 9, #ARGV do
     table.insert(args, ARGV[i])
 end
 redis.call('HSET', unpack(args))
 
 -- 4. 挂载当前任务依赖到队列任务依赖列表中
 -- 4. Mount the current task dependent to the queue task dependent list
-redis.call('SADD', dependent_key, dependent_task_key)
+redis.call('ZADD', dependent_key, dependent_deadline, dependent_task_key)
 
 -- 5. 设置任务截止时间(若有设置deadline)
 -- 5. Set the task deadline (if a deadline is set)

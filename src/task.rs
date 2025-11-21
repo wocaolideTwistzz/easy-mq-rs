@@ -62,6 +62,12 @@ pub struct TaskOptions {
     /// No deadline is set by default
     pub deadline_ms: Option<u64>,
 
+    /// 任务在 dependent 队列中等待依赖的截止时间，可选，默认不设置
+    /// Task dependent deadline (in milliseconds), optional, specifies the time by which the task waiting for
+    /// dependencies in `dependent` queue.
+    /// No dependent deadline is set by default.
+    pub dependent_deadline_ms: Option<u64>,
+
     /// 任务调度时间，可选，指定任务的执行时间或依赖条件
     /// Task scheduled time, optional, specifies when or under what conditions the task should be executed
     pub scheduled_at: Option<ScheduledAt>,
@@ -470,6 +476,7 @@ impl Default for TaskOptions {
             retry: None,
             timeout_ms: None,
             deadline_ms: None,
+            dependent_deadline_ms: None,
             scheduled_at: None,
             slot: None,
         }

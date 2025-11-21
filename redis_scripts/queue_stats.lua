@@ -33,7 +33,7 @@ if type(msg) == 'table' and not msg.err and type(msg[1]) == "table" and #msg[1] 
 end
 
 local scheduled_count = redis.call('ZCARD', scheduled_key)
-local dependent_count = redis.call('SCARD', dependent_key)
+local dependent_count = redis.call('ZCARD', dependent_key)
 local completed_count = redis.call('ZCARD', archive_key)
 
 return {
