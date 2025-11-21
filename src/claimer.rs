@@ -367,9 +367,8 @@ impl<B: Broker + Send + Sync + 'static> Claimer<B> {
                     Ok(n) => debug!("claim scheduled tasks: {}", n),
                     Err(e) => warn!("claim scheduled tasks failed: {}", e),
                 }
-
-                tokio::time::sleep(Duration::from_secs(interval_sec)).await;
             }
+            tokio::time::sleep(Duration::from_secs(interval_sec)).await;
         }
     }
 

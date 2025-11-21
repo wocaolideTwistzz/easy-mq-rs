@@ -466,6 +466,10 @@ pub enum TaskCompletedState {
     /// 任务被取消
     /// Task was canceled
     Canceled,
+
+    /// 任务完成, 但是不是被取消的
+    /// Task completed but not because of canceled.
+    NotCanceled,
 }
 
 impl Default for TaskOptions {
@@ -525,10 +529,11 @@ impl AsRef<str> for TaskState {
 impl AsRef<str> for TaskCompletedState {
     fn as_ref(&self) -> &str {
         match self {
-            TaskCompletedState::Any => "*",
+            TaskCompletedState::Any => "any",
             TaskCompletedState::Canceled => "canceled",
             TaskCompletedState::Failed => "failed",
             TaskCompletedState::Succeed => "succeed",
+            TaskCompletedState::NotCanceled => "not_canceled",
         }
     }
 }

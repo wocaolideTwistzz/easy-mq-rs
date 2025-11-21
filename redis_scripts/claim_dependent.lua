@@ -142,7 +142,9 @@ while true do
 
             local state = redis.call('HGET', required_task_key, 'state');
             if state == 'canceled' or state == 'succeed' or state == 'failed' then
-                if required_task_state == '*' or state == required_task_state then
+                if required_task_state == 'any'
+                    or required_task_state == state
+                    or (required_task_state == 'not_canceled' and (state ~= 'canceled')) then
                     -- 任务完成状态与依赖的状态匹配
                     -- Match task completion state with dependency state.
                     table.insert(completed_tasks, required_task_key)
